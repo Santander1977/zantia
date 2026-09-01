@@ -56,6 +56,12 @@ class AppointmentService(Protocol):
 
     def get_appointment(self, appointment_id: str) -> Optional[Appointment]: ...
 
+    def get_patient_appointments(self, patient_reference: str) -> List[Appointment]:
+        """Extensión (agente bidireccional): necesaria para CONSULTAR_CITA
+        y para localizar la cita vigente de un paciente que inicia una
+        reprogramación/cancelación sin partir de una Activity conocida."""
+        ...
+
 
 class MockAppointmentService:
     """Disponibilidad ficticia pero DINÁMICA (prompt 007, sección 12):
@@ -196,3 +202,8 @@ class MockAppointmentService:
             actualizada = appointment.model_copy(update={"status": AppointmentStatus.ATTENDED})
             self._appointments[appointment_id] = actualizada
             return actualizada
+
+    def get_patient_appointments(self, patient_reference: str) -> List[Appointment]:
+        """Extensión aditiva (agente bidireccional) — no cambia el
+        comportamiento de ningún método existente."""
+        return [a for a in self._appointments.values() if a.patient_reference == patient_reference]

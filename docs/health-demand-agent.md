@@ -103,3 +103,19 @@ Todos los pacientes y datos usados en tests/ejemplos son ficticios (`PAC-*`, "Ma
 - El protocolo de riesgo/urgencia real sigue siendo el genérico y no-clínico heredado del Core (`core/brain.py:RISK_KEYWORDS_DEMO`) — el criterio clínico real sigue **PENDIENTE DE VALIDACIÓN CLÍNICA/LEGAL** (heredado de `003`/`004`).
 - `ReminderManager`/`EventLog` viven en memoria de proceso — no hay un scheduler real que dispare recordatorios por sí solo a la hora programada (en este MVP, `fire_reminder` se invoca explícitamente, simulando el paso del tiempo).
 - `MockAppointmentService` no modela solapamiento de turnos, franjas por profesional/agenda real ni reglas de negocio de la IPS — es deliberadamente simple (sección 38: no sobrediseñar).
+
+## Extensión: acceso bidireccional (`domains/health/gateway.py`)
+
+Añadida sobre este mismo dominio (2026-09-01, misma sesión), sin tocar `Activity`, `HealthBrain`, `AppointmentService`/`MockAppointmentService` (salvo la extensión aditiva `get_patient_appointments`), `ReminderManager`, `ActivityResultSink`, `MockChannel` ni las funciones existentes de `agent.py`.
+
+**Problema que resuelve**: hasta aquí, toda conversación nacía de una `Activity` creada por la IPS (`contact_patient`, siempre outbound). Un mensaje **inbound** puede ser una respuesta a algo en curso o una solicitud nueva del paciente — el documento fuente original no especificaba cómo distinguirlos.
+
+**Mecanismo de correlación** (`HealthGateway`, `domains/health/gateway.py`): un registro `patient_reference -> conversation_id` (verificado por frescura en cada consulta, no por cierre explícito recordado en cada punto de salida). Si hay una conversación abierta, se enruta ahí con `handle_patient_message` (Core, sin tocar). Si no, se clasifica la intención (`domains/health/intent.py`, determinista por palabras clave, independiente de `HealthBrain`) y se crea una `PatientRequest`.
+
+**Reuso, no duplicación**: `PROGRAMAR_CITA`/`REPROGRAMAR_CITA`/`CANCELAR_CITA` iniciados por el paciente construyen una Activity **sintética** (`source_system="PATIENT_INITIATED"`) y la alimentan al mismo `HealthBrain`/`Orchestrator` ya construido — literalmente las mismas funciones que usa el camino de demanda inducida y el de recordatorios (verificado con un test que cuenta invocaciones de `HealthBrain._iniciar_reprogramacion` en ambos caminos). `CONSULTAR_CITA`/`CONFIRMAR_CITA` sin conversación previa son deterministas y directas contra `AppointmentService` — no necesitan máquina de estados.
+
+**`patient_confirmation_status`**: campo nuevo (`ConfirmationTracker`, `domains/health/confirmation.py`), separado de `AppointmentStatus` — la agenda sigue siendo la única fuente de verdad del estado real de la cita.
+
+**Corrección encontrada al implementar esta extensión** (no oculta): una Activity sintética recién reservada quedaba "abierta" indefinidamente (su `status` seguía `PENDING`/`IN_PROGRESS`, nunca `accept_activity`d ni `finalize_and_report`d), así que cualquier mensaje posterior del paciente sobre un asunto distinto quedaba atrapado en la conversación ya resuelta. Corregido: `_cerrar_si_definitivo` cierra automáticamente (reutilizando `finalize_and_report`, sin tocarlo) toda Activity `PATIENT_INITIATED` apenas alcanza un desenlace definitivo (reservada/reprogramada/declinada) — nunca se aplica a una Activity de demanda inducida real, que sigue su propio ciclo de vida a través de recordatorios.
+
+Tests: `tests/domains/health/test_bidirectional_gateway.py` (8 tests) + los 63 anteriores = 71/71.

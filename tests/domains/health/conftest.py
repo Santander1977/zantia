@@ -9,6 +9,7 @@ from domains.health import (
     MockActivityResultSink,
     ReminderManager,
     build_health_agent_context,
+    build_health_gateway,
 )
 
 
@@ -55,6 +56,19 @@ def context(services):
     activity = services["source"].create(nueva_activity())
     return build_health_agent_context(
         activity,
+        services["source"],
+        services["appointment_service"],
+        services["reminder_manager"],
+        services["result_sink"],
+    )
+
+
+@pytest.fixture
+def gateway(services):
+    """Extensión aditiva (agente bidireccional) — no modifica los
+    fixtures `services`/`context`/`activity_factory` de arriba, ya
+    usados por la suite de la fase de demanda inducida (recado 007)."""
+    return build_health_gateway(
         services["source"],
         services["appointment_service"],
         services["reminder_manager"],

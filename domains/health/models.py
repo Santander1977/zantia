@@ -224,3 +224,62 @@ class ActivityResult(BaseModel):
     summary: str = ""
     next_action: Optional[str] = None
     correlation_id: Optional[str] = None
+
+
+# =======================================================================
+# Extensión: acceso bidireccional (ZANTIA Health — Agente de Acceso y
+# Gestión de Atención). Añadido sobre el diseño de demanda inducida ya
+# construido (recado 007), sin tocar nada de lo anterior en este archivo.
+# =======================================================================
+
+
+class RequestIntent(str, Enum):
+    """Catálogo mínimo de intenciones de una solicitud iniciada por el
+    paciente (distinto de `Activity.activity_type`, que es del sistema
+    originador)."""
+
+    PROGRAMAR_CITA = "PROGRAMAR_CITA"
+    REPROGRAMAR_CITA = "REPROGRAMAR_CITA"
+    CANCELAR_CITA = "CANCELAR_CITA"
+    CONSULTAR_CITA = "CONSULTAR_CITA"
+    CONFIRMAR_CITA = "CONFIRMAR_CITA"
+    DEMANDA_INDUCIDA = "DEMANDA_INDUCIDA"
+    INFORMACION_SERVICIO = "INFORMACION_SERVICIO"
+    ESCALAMIENTO = "ESCALAMIENTO"
+
+
+class RequestStatus(str, Enum):
+    RECIBIDA = "RECIBIDA"
+    EN_PROCESO = "EN_PROCESO"
+    RESUELTA = "RESUELTA"
+    ESCALADA = "ESCALADA"
+
+
+class PatientRequest(BaseModel):
+    """Solicitud iniciada por el PACIENTE — distinta de `Activity`
+    (trabajo asignado por el sistema IPS). Una `PatientRequest` puede
+    dar lugar, internamente, a una `Activity` sintética que reutiliza el
+    mismo motor conversacional ya construido (ver `domains/health/gateway.py`),
+    pero como registro de dominio son conceptos separados: `Activity` =
+    "la IPS decidió que había que contactar a este paciente";
+    `PatientRequest` = "el paciente decidió escribir por su cuenta"."""
+
+    model_config = {"validate_assignment": True}
+
+    request_id: str
+    patient_reference: str
+    intent: RequestIntent
+    channel: str
+    created_at: datetime = Field(default_factory=_utcnow)
+    status: RequestStatus = RequestStatus.RECIBIDA
+
+
+class PatientConfirmationStatus(str, Enum):
+    """Confirmación de ASISTENCIA declarada por el paciente — campo
+    deliberadamente separado de `AppointmentStatus` (la agenda sigue
+    siendo la única fuente de verdad del estado REAL de la cita; esto
+    es solo lo que el paciente dijo, nunca se sobreescriben entre sí)."""
+
+    SIN_CONFIRMAR = "SIN_CONFIRMAR"
+    CONFIRMADO = "CONFIRMADO"
+    RECHAZADO = "RECHAZADO"

@@ -13,6 +13,16 @@ from .agent import (
 )
 from .appointment_service import AppointmentService, MockAppointmentService
 from .brain import HealthBrain
+from .confirmation import ConfirmationTracker
+from .gateway import (
+    HealthGateway,
+    build_health_gateway,
+    find_open_context,
+    handle_inbound_message,
+    register_context,
+    start_activity_and_register,
+)
+from .intent import classify_intent
 from .models import (
     Activity,
     ActivityResult,
@@ -22,10 +32,15 @@ from .models import (
     AppointmentStatus,
     AvailabilitySlot,
     ManagementStatus,
+    PatientConfirmationStatus,
+    PatientRequest,
     Reminder,
     ReminderStatus,
     ReminderType,
+    RequestIntent,
+    RequestStatus,
 )
+from .patient_request_source import MockPatientRequestSource, PatientRequestSource
 from .reminder_manager import ReminderManager
 from .result_sink import ActivityResultSink, MockActivityResultSink
 
@@ -45,6 +60,14 @@ __all__ = [
     "AppointmentService",
     "MockAppointmentService",
     "HealthBrain",
+    "ConfirmationTracker",
+    "HealthGateway",
+    "build_health_gateway",
+    "find_open_context",
+    "handle_inbound_message",
+    "register_context",
+    "start_activity_and_register",
+    "classify_intent",
     "Activity",
     "ActivityResult",
     "ActivityResultType",
@@ -53,9 +76,15 @@ __all__ = [
     "AppointmentStatus",
     "AvailabilitySlot",
     "ManagementStatus",
+    "PatientConfirmationStatus",
+    "PatientRequest",
     "Reminder",
     "ReminderStatus",
     "ReminderType",
+    "RequestIntent",
+    "RequestStatus",
+    "MockPatientRequestSource",
+    "PatientRequestSource",
     "ReminderManager",
     "ActivityResultSink",
     "MockActivityResultSink",
