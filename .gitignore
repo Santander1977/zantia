@@ -1,0 +1,24 @@
+# Contexto de cliente — nunca se commitea (contiene datos/credenciales reales del proyecto instanciado)
+docs/CLIENT.local.md
+.claude/settings.local.json
+
+# Credenciales de MCP / integraciones — nunca se commitean
+.mcp.json
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Dependencias (si el proyecto instanciado usa alguno de estos gestores)
+node_modules/
+__pycache__/
+.venv/
+venv/
+*.pyc

@@ -1,0 +1,25 @@
+# Contexto de cliente — [nombre del proyecto]
+
+> Copiar este archivo a `docs/CLIENT.local.md` (ya está en `.gitignore` — nunca se commitea) y rellenarlo con el discovery real del cliente. Nunca dejar este `.example` con datos reales dentro.
+
+## Cliente / institución
+
+[Completar.]
+
+## Contexto de negocio
+
+[Completar: qué problema real resuelve este proyecto para este cliente.]
+
+## Credenciales e infraestructura del cliente
+
+> Nombres de variables y de dónde viven — NUNCA valores reales en texto plano en este documento salvo que el propio flujo de trabajo lo requiera explícitamente; preferir el gestor de secretos de la plataforma.
+
+- [Completar: ej. "n8n: ver `.mcp.json` (gitignored) para URL y API key"]
+
+## Decisiones de dominio específicas de este cliente
+
+[Completar: reglas de negocio, horarios, catálogos, etc. — todo lo que sería `[ESPECÍFICO-DEL-CLIENTE]` si se auditara este proyecto en el futuro.]
+
+## Pendientes / decisiones abiertas con el cliente
+
+[Completar.]
