@@ -1,4 +1,4 @@
-# MODELO DE DATOS — icaco
+# MODELO DE DATOS — ZANTIA
 
 > Dominios de datos y, para cada uno, quién es la fuente de verdad (ver `.claude/rules/fuente-de-verdad.md`). No se documenta el detalle exhaustivo de cada columna aquí si el proyecto ya tiene migraciones versionadas — se documenta la relación y la decisión de diseño, remitiendo a las migraciones para el detalle exacto.
 

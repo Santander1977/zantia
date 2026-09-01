@@ -1,6 +1,6 @@
 # Protección de datos personales (habeas data)
 
-> Regla de dominio adicional a las obligatorias de `PROJECT-TEMPLATE`, añadida en la creación de `icaco` porque el proyecto es un agente conversacional que procesa mensajes y datos de usuarios finales reales.
+> Regla de dominio adicional a las obligatorias de `PROJECT-TEMPLATE`, añadida en la creación de este proyecto (bajo el nombre "icaco", identidad conceptual renombrada a "ZANTIA" el 2026-09-01 — ver `PROJECT.md` y `/Users/enzoalfonso/recado/005-migracion-icaco-a-zantia.md`) porque el proyecto es un agente conversacional que procesa mensajes y datos de usuarios finales reales.
 
 ## Reglas obligatorias
 
@@ -13,4 +13,4 @@
 
 ## Origen de esta regla
 
-Añadida al crear `icaco` con `/new-project`: el tipo de proyecto (agente conversacional) implica manejo directo de datos personales de usuarios finales desde el primer mensaje, por lo que la protección de datos no puede quedar pospuesta como "tarea futura".
+Añadida al crear este proyecto (nombre original "icaco") con `/new-project`: el tipo de proyecto (agente conversacional) implica manejo directo de datos personales de usuarios finales desde el primer mensaje, por lo que la protección de datos no puede quedar pospuesta como "tarea futura". El renombrado conceptual a ZANTIA no modifica el alcance de esta regla — sigue aplicando igual, ahora también a cualquier dominio nuevo que se construya sobre el Core.

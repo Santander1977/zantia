@@ -1,4 +1,4 @@
-# Guía de contribución — icaco
+# Guía de contribución — ZANTIA
 
 ## Flujo de trabajo
 
@@ -12,7 +12,7 @@
 
 ## Reglas heredadas de `PROJECT-TEMPLATE`
 
-Este proyecto hereda las reglas obligatorias de `.claude/rules/` (protección de producción, contratos API, secretos, testing, aislamiento, documentación) más una regla de dominio adicional propia de `icaco`: protección de datos personales / habeas data (`.claude/rules/proteccion-datos-personales.md`). Ver cada archivo en `.claude/rules/` para el detalle — no se repiten aquí para evitar que este archivo quede desactualizado frente a la fuente real.
+Este proyecto hereda las reglas obligatorias de `.claude/rules/` (protección de producción, contratos API, secretos, testing, aislamiento, documentación) más una regla de dominio adicional propia de `ZANTIA` (creada bajo el nombre "icaco", ver `PROJECT.md`): protección de datos personales / habeas data (`.claude/rules/proteccion-datos-personales.md`). Ver cada archivo en `.claude/rules/` para el detalle — no se repiten aquí para evitar que este archivo quede desactualizado frente a la fuente real.
 
 ## Seguridad y credenciales
 

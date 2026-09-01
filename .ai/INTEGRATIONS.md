@@ -1,4 +1,4 @@
-# INTEGRACIONES — icaco
+# INTEGRACIONES — ZANTIA
 
 > Sistemas externos que ESTE proyecto consume o con los que se integra (automatización, mensajería, pagos, terceros). Distinto de `.ai/API_CONTRACTS.md` (lo que este proyecto expone).
 

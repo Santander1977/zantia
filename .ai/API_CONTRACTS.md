@@ -1,4 +1,4 @@
-# CONTRATOS API — icaco
+# CONTRATOS API — ZANTIA
 
 > Endpoints/contratos que ESTE proyecto expone hacia afuera (lo que otros consumen de él). Para lo que este proyecto consume de sistemas externos, ver `.ai/INTEGRATIONS.md`.
 

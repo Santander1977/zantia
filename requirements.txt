@@ -1,0 +1,11 @@
+# ZANTIA Core — dependencias del MVP.
+# Ver /Users/enzoalfonso/recado/006-construccion-zantia.md para la
+# justificación de cada elección (sección "Stack").
+
+pydantic>=2,<3
+pytest>=8,<9
+
+# Opcional — solo necesaria si se usa core/brain.py:AnthropicBrain con
+# un modelo real. NO se instala por defecto ni es requerida para correr
+# la suite de tests (que usa FakeBrain). Descomentar si se activa:
+# anthropic>=0.40

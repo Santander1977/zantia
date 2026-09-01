@@ -1,4 +1,4 @@
-# SEGURIDAD — icaco
+# SEGURIDAD — ZANTIA
 
 > Mecanismos de autenticación existentes + inventario de secretos. NUNCA se escribe un valor real de secreto en este archivo — solo nombre, propósito y dónde vive.
 

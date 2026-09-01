@@ -1,4 +1,4 @@
-# DESPLIEGUE — icaco
+# DESPLIEGUE — ZANTIA
 
 > Mapa LOCAL → BUILD → DEPLOY → SERVICIO → DOMINIO → DEPENDENCIAS, por componente. Se documenta ANTES del primer deploy real, no se reconstruye después por auditoría.
 

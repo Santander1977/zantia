@@ -1,39 +1,65 @@
-# ARQUITECTURA — icaco
+# ARQUITECTURA — ZANTIA
 
 > Memoria comprimida, siempre vigente. Se lee completa al empezar una sesión. El detalle largo que no quepa aquí vive en `docs/architecture/`, enlazado desde este archivo — nunca duplicado.
 
 ## Identidad rápida
 
-Ver `PROJECT.md` para el contexto completo de negocio. Resumen: agente conversacional (tipo de proyecto confirmado el 2026-08-31; stack aún sin decidir).
+Ver `PROJECT.md` para el contexto completo de negocio. Resumen: plataforma de inteligencia agéntica multi-dominio (identidad conceptual "ZANTIA" desde 2026-09-01; nació como agente conversacional de un solo dominio bajo el nombre "icaco" — ver `/Users/enzoalfonso/recado/005-migracion-icaco-a-zantia.md`). Stack del Core: Python 3.9 + pydantic + pytest + `sqlite3` (stdlib) — ver `.ai/DECISIONS.md`.
 
 ## Topología
 
 Monorepo único (decisión confirmada el 2026-08-31, no se asume por defecto).
 
-| Repo | Ruta | Remoto | Rol |
+| Repo (nombre conceptual) | Ruta física | Remoto | Rol |
 |---|---|---|---|
-| icaco | `/Users/enzoalfonso/Orangutan/icaco` | — (aún no inicializado como repo git) | único repo del proyecto |
+| ZANTIA | `/Users/enzoalfonso/Orangutan/icaco` | — (repo git local, sin remoto) | único repo del proyecto |
+
+Nota deliberada: el nombre conceptual (ZANTIA) y el nombre de la carpeta física (`icaco`) son distintos a propósito — ver la nota de nomenclatura en `PROJECT.md`.
 
 ## Componentes
 
-[Completar cuando se elija el stack — todavía no se ha creado ningún componente de código, solo el andamiaje heredado de `PROJECT-TEMPLATE`.]
+Core del MVP, ya implementado y con tests pasando (ver `.ai/TESTING.md` y `/Users/enzoalfonso/recado/006-construccion-zantia.md`):
 
 | Componente | Tecnología | Rol | Repo/carpeta |
 |---|---|---|---|
-| | | | |
+| Orchestrator | Python | Único punto de escritura del estado; coordina Brain/Guardrails/Tools/Memory (LLM propone, orquestador decide) | `core/orchestrator.py` |
+| Brain | Python (FakeBrain determinista) + stub real (Anthropic, sin probar en vivo) | Interpreta el mensaje, propone cambios de estado — nunca los escribe | `core/brain.py` |
+| ConversationState | pydantic | Fuente única de verdad para decisiones de flujo | `state/models.py` |
+| StateStore | `sqlite3` (stdlib) | Persistencia real con concurrencia optimista por versión | `state/store.py` |
+| Máquina de estados | Python | Transiciones válidas/inválidas, interrupciones globales | `state/machine.py` |
+| Memory | Python (memoria de proceso) | Conversación reciente / perfil de usuario (parcial) / resumen | `memory/` |
+| Knowledge | Python | Separación estático/dinámico; RAG documentado como stub, no implementado | `knowledge/` |
+| Tools | Python | Contrato READ/WRITE/NOTIFY + 3 tools de demostración (datos ficticios) | `tools/` |
+| Guardrails | Python | 3 reglas deterministas reales (riesgo, consentimiento, promesas prohibidas) | `guardrails/` |
+| Observability | Python | Registro append-only de eventos (transiciones, tools, guardrails, errores) | `observability/` |
+| Agente de demostración | Python | Valida el Core de extremo a extremo; NO es un dominio real | `agents/demo/` |
+| Contratos de dominio | Python (solo interfaz) | `domains/{health,emergency,sales,citizen}/` sin lógica todavía | `domains/` |
+| Contrato de canal | Python (solo interfaz) | Sin canal real elegido | `channels/` |
 
 ## Capas (si aplica al tipo de proyecto)
 
-- **Experiencia**: canal conversacional de cara al usuario final (ej. WhatsApp/Telegram u otro — canal exacto pendiente de confirmar, ver `.ai/INTEGRATIONS.md`).
-- **Aplicaciones**: lógica del agente conversacional (dominio de negocio pendiente de completar en `PROJECT.md`).
-- **Integración**: mensajería externa — ver `.ai/INTEGRATIONS.md`.
-- **Datos**: datos de conversación y de contacto de usuarios finales — sujetos a `.claude/rules/proteccion-datos-personales.md`; ver `.ai/DATA_MODEL.md`.
-- **Inteligencia**: agente de IA de dominio — se documenta en `.ai/AGENTS.md` solo cuando exista un agente real implementado (por ahora permanece vacío por diseño).
+- **Experiencia**: canal conversacional de cara al usuario final — sin decidir (ver `channels/contract.py` y `.ai/INTEGRATIONS.md`).
+- **Aplicaciones**: `core/orchestrator.py` + `core/agent_contract.py` — agnósticos de dominio.
+- **Integración**: `tools/` (READ/WRITE/NOTIFY) — solo tools de demostración ficticias por ahora.
+- **Datos**: `state/` (ConversationState) + `memory/` — sujetos a `.claude/rules/proteccion-datos-personales.md`; ver `.ai/DATA_MODEL.md`.
+- **Inteligencia**: `core/brain.py` — `FakeBrain` (determinista, usado en tests y demo) y `AnthropicBrain` (real, documentado, sin ejercer en esta sesión). Documentado en `.ai/AGENTS.md`.
 
 ## Dependencias entre componentes
 
-[Completar: diagrama o tabla de quién consume a quién.]
+```
+channels (sin implementar) -> core.Orchestrator -> {
+    state.StateStore, memory.ConversationMemory, core.Brain,
+    tools.ToolRegistry, guardrails.GuardrailEngine, observability.EventLog
+}
+agents/demo -> core.agent_contract.build_orchestrator -> ensambla todo lo anterior
+domains/* -> (futuro) implementarán domains.contract.DomainModule, consumiendo
+             core.agent_contract.AgentDefinition — todavía no lo hacen
+```
 
 ## Rutas críticas
 
-[Completar: qué archivos/carpetas rompen el sistema si se mueven o modifican sin cuidado — clasificar 🔴/🟠/🟡/🟢 igual que en el `/audit`.]
+- 🔴 `/Users/enzoalfonso/Orangutan/icaco` (la carpeta raíz en sí) — ancla la memoria de sesión de Claude Code (`~/.claude/projects/-Users-enzoalfonso-Orangutan-icaco/`). No renombrar sin plan explícito (ver recado 005).
+- 🟡 `state/models.py` — cualquier cambio de campo del `ConversationState` afecta a todo el Core (Orchestrator, Guardrails, Brain, tests).
+- 🟡 `state/machine.py` — cambiar `VALID_TRANSITIONS` sin actualizar `core/orchestrator.py` puede dejar transiciones huérfanas.
+- 🟢 `tools/demo_tools.py`, `agents/demo/` — de demostración, seguros de modificar/eliminar cuando exista un dominio real.
+- 🟢 `domains/*/README.md` — placeholders, seguros de reemplazar cuando se diseñe cada dominio.

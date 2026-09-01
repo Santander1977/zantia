@@ -1,4 +1,4 @@
-# DESCUBRIMIENTOS — icaco
+# DESCUBRIMIENTOS — ZANTIA
 
 > Hallazgos crudos de cada `/audit`, sin pulir. Cuando un hallazgo se confirma como estable y relevante, se destila hacia `.ai/ARCHITECTURE.md` (si es estructural) o `.ai/CURRENT_STATE.md` (si es de estado) — este archivo no reemplaza a esos, es su materia prima.
 
