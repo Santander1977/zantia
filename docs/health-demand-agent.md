@@ -119,3 +119,24 @@ Añadida sobre este mismo dominio (2026-09-01, misma sesión), sin tocar `Activi
 **Corrección encontrada al implementar esta extensión** (no oculta): una Activity sintética recién reservada quedaba "abierta" indefinidamente (su `status` seguía `PENDING`/`IN_PROGRESS`, nunca `accept_activity`d ni `finalize_and_report`d), así que cualquier mensaje posterior del paciente sobre un asunto distinto quedaba atrapado en la conversación ya resuelta. Corregido: `_cerrar_si_definitivo` cierra automáticamente (reutilizando `finalize_and_report`, sin tocarlo) toda Activity `PATIENT_INITIATED` apenas alcanza un desenlace definitivo (reservada/reprogramada/declinada) — nunca se aplica a una Activity de demanda inducida real, que sigue su propio ciclo de vida a través de recordatorios.
 
 Tests: `tests/domains/health/test_bidirectional_gateway.py` (8 tests) + los 63 anteriores = 71/71.
+
+## Integración real: `HrmmAppointmentService` (2026-09-01, misma sesión)
+
+Adaptador que implementa `AppointmentService` (el mismo Protocol de 007, sin modificarlo salvo la extensión aditiva `get_patient_appointments`) contra la API real de **hrmm-backend** (otro proyecto de este ecosistema, en `/Users/enzoalfonso/Orangutan/hrmm/backend`) — verificada leyendo su código fuente real, solo lectura, sin modificar nada de ese proyecto.
+
+**Archivos**: `hrmm_http.py` (capa HTTP, `RealHttpClient` con `urllib` stdlib + `FakeHttpClient` para tests), `hrmm_catalog.py` (`CatalogMirror`, espejo local de servicios/médicos — `HealthBrain` nunca inventa catálogos, siempre consulta este espejo), `hrmm_appointment_service.py` (el adaptador en sí).
+
+**Identidad del paciente**: convención explícita — con `HrmmAppointmentService` activo, `patient_reference` (interno de ZANTIA) ES el documento de identidad real. Camino Activity: `require_document_on_activity` exige `Activity.patient_contact['documento']`, falla claro si falta, nunca lo inventa. Camino PatientRequest: `resolve_patient_identity` usa `GET /citas/buscar-paciente` (público, confirmado sin autenticación leyendo el código — mismo patrón que ya usa el chatbot n8n existente de hrmm).
+
+**Verificación por código — el hallazgo no contemplado en el pedido original**: verificando el código real se encontró que `reprogramar`/`cancelar` exigen, además de nuestra autenticación de canal (`X-Backend-Secret`), un código de 6 dígitos enviado por correo al paciente (`POST /verificacion/enviar`, TTL 10 min, 5 intentos, un solo uso — confirmado en `hrmm-backend/app/recovery_codes.py`). Por eso `cancel_appointment`/`reschedule_appointment` (la firma estándar del Protocol) **siempre lanzan `VerificationRequiredError`** — la ejecución real solo ocurre a través de `cancel_appointment_verified`/`reschedule_appointment_verified`, orquestados por un wizard nuevo y completo en `domains/health/gateway.py` (envía código → pausa el turno → valida → ejecuta), sin tocar `HealthBrain`. Ver decisión D-4 (`docs/decisions/d-4-adaptador-real-hrmm-backend.md`).
+
+**Idempotencia reforzada**: antes de reservar, se verifica vía `get_patient_appointments` si ya existe una cita activa equivalente (mismo paciente/servicio/fecha) — protege específicamente el camino Activity, donde un reintento del sistema IPS podría disparar la misma gestión dos veces con una `idempotency_key` distinta.
+
+**Corrección encontrada al implementar** (no oculta): `Appointment.service` se estaba llenando con el `servicio_id` crudo de hrmm-backend en vez del nombre legible, rompiendo el wizard de reprogramación (que necesita volver a consultar `get_availability(cita.service)`, y esa función espera un NOMBRE, no un ID). Corregido con `CatalogMirror.nombre_por_servicio_id`.
+
+**Estado de las pruebas**: 20 tests nuevos, todos contra `FakeHttpClient` (sin red real, sin secretos reales) — **0 pruebas ejecutadas contra la red real de hrmm-backend en esta sesión**, por decisión explícita del usuario ("todavía no ejecutar pruebas de red real"). Existe un test de integración real (`test_get_availability_contra_hrmm_backend_real`) pero está deshabilitado por defecto.
+
+**Pendiente, no resuelto en esta fase**:
+- Capa de configuración que decida Mock vs. `HrmmAppointmentService` según `HRMM_BACKEND_ENV` — no construida.
+- Pruebas de integración reales — no existe staging documentado para hrmm-backend (confirmado); falta decidir si se prueba contra producción con datos de prueba marcados, con backup/verificación previos.
+- Envío del correo nativo de confirmación de hrmm-backend (`POST /citas/{id}/enviar-confirmacion`) — mecanismo DISTINTO al de verificación (confirmado leyendo el código); coexiste sin cambios, ZANTIA no lo suprime ni lo reemplaza, pero tampoco lo invoca activamente todavía.
