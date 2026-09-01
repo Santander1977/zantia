@@ -37,6 +37,13 @@ VALID_TRANSITIONS: Dict[FaseActual, Set[FaseActual]] = {
     FaseActual.IDENTIFICACION_DE_INTENCION: {
         FaseActual.IDENTIFICACION_DE_INTENCION,  # reintento por ambigüedad
         FaseActual.RECOPILACION_DE_DATOS,
+        # Misma corrección de implementación que RECOPILACION_DE_DATOS ->
+        # RESPUESTA (ver más abajo): cuando la intención ya es suficiente
+        # para ejecutar una acción sin necesitar más datos (p. ej. una
+        # decisión final del paciente, o una cancelación), el turno
+        # completo (razonamiento + acción) ocurre de forma síncrona.
+        # Encontrado al construir el dominio salud — ver recado 007.
+        FaseActual.RESPUESTA,
     },
     FaseActual.RECOPILACION_DE_DATOS: {
         FaseActual.RECOPILACION_DE_DATOS,  # ciclo válido, con contador (orchestrator)

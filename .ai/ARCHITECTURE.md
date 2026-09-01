@@ -33,8 +33,9 @@ Core del MVP, ya implementado y con tests pasando (ver `.ai/TESTING.md` y `/User
 | Guardrails | Python | 3 reglas deterministas reales (riesgo, consentimiento, promesas prohibidas) | `guardrails/` |
 | Observability | Python | Registro append-only de eventos (transiciones, tools, guardrails, errores) | `observability/` |
 | Agente de demostración | Python | Valida el Core de extremo a extremo; NO es un dominio real | `agents/demo/` |
-| Contratos de dominio | Python (solo interfaz) | `domains/{health,emergency,sales,citizen}/` sin lógica todavía | `domains/` |
-| Contrato de canal | Python (solo interfaz) | Sin canal real elegido | `channels/` |
+| **Dominio salud** (primer dominio real) | Python | Demanda inducida y gestión de citas para una IPS — Activity, AppointmentService, ReminderManager, ActivityResult. Ver `docs/health-demand-agent.md` | `domains/health/` |
+| Contratos de dominio (resto) | Python (solo interfaz) | `domains/{emergency,sales,citizen}/` sin lógica todavía | `domains/` |
+| Contrato de canal | Python (solo interfaz) + `MockChannel` | Sin canal real elegido; `MockChannel` demuestra el contrato | `channels/` |
 
 ## Capas (si aplica al tipo de proyecto)
 
@@ -62,4 +63,5 @@ domains/* -> (futuro) implementarán domains.contract.DomainModule, consumiendo
 - 🟡 `state/models.py` — cualquier cambio de campo del `ConversationState` afecta a todo el Core (Orchestrator, Guardrails, Brain, tests).
 - 🟡 `state/machine.py` — cambiar `VALID_TRANSITIONS` sin actualizar `core/orchestrator.py` puede dejar transiciones huérfanas.
 - 🟢 `tools/demo_tools.py`, `agents/demo/` — de demostración, seguros de modificar/eliminar cuando exista un dominio real.
-- 🟢 `domains/*/README.md` — placeholders, seguros de reemplazar cuando se diseñe cada dominio.
+- 🟢 `domains/*/README.md` — placeholders, seguros de reemplazar cuando se diseñe cada dominio (`domains/health/` ya no aplica — es real).
+- 🟡 `domains/health/models.py` (`Activity`, `Appointment`, `Reminder`) — cambios de campo afectan a `agent.py`, `brain.py`, `tools.py` y toda la suite `tests/domains/health/`.

@@ -196,10 +196,15 @@ class Orchestrator:
             resultado_tool = self._ejecutar_tool(
                 state, conversation_id, brain_output.tool_requerida
             )
-            if resultado_tool is None:  # error irrecuperable -> ya escalado dentro de _ejecutar_tool
-                actualizado = self._store.get(conversation_id)
-                return OrchestratorResult(
-                    response=_MENSAJE_ESCALADO_ESTANDAR, state=actualizado, escalated=True
+            if resultado_tool is None:
+                # Error irrecuperable de la tool (excepción/no encontrada):
+                # se escala de verdad (no solo se declara escalado) — antes
+                # esta rama devolvía escalated=True sin transicionar
+                # fase_actual, dejando la conversación en un estado
+                # inconsistente. Corregido al construir el dominio salud
+                # (prompt 007, sección 14) — ver recado 007.
+                return self._escalar(
+                    state, conversation_id, urgente=False, motivo="error irrecuperable de herramienta"
                 )
             cambios_propuestos.setdefault("herramientas_utilizadas", list(state.herramientas_utilizadas))
             cambios_propuestos["herramientas_utilizadas"].append(
@@ -209,6 +214,17 @@ class Orchestrator:
             cambios_propuestos["resultado_de_herramientas"][brain_output.tool_requerida["name"]] = (
                 resultado_tool.data
             )
+            if not resultado_tool.success:
+                # La tool respondió (no lanzó excepción) pero NO tuvo éxito
+                # (p.ej. un turno ya no disponible). No se debe dejar pasar
+                # el texto optimista que el Brain propuso ANTES de conocer
+                # este resultado — corrección encontrada al construir el
+                # dominio salud (prompt 007, sección 14: "no declarar
+                # confirmado si el sistema no confirmó"). Ver recado 007.
+                respuesta_final = (
+                    "No pude completar esa acción "
+                    f"({resultado_tool.error or 'sin más detalle'}). ¿Lo intentamos de nuevo?"
+                )
 
         siguiente_fase = self._determinar_siguiente_fase(state.fase_actual, brain_output, resultado_tool)
         try:

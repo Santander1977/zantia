@@ -8,3 +8,4 @@ Estados posibles: `PROPUESTA` → `PENDIENTE DE APROBACIÓN` → `APROBADA` → 
 |---|---|---|---|
 | D-1 | Stack del Core MVP: Python 3.9 + pydantic + pytest + `sqlite3` (stdlib) | IMPLEMENTADA | `docs/decisions/d-1-stack-core-mvp.md` |
 | D-2 | Conservar el nombre físico de carpeta `icaco` bajo la identidad conceptual ZANTIA | IMPLEMENTADA | `docs/decisions/d-2-nombre-fisico-icaco.md` |
+| D-3 | Tres capas de estado separadas (ConversationState / Activity.status / Activity.management_status) para el dominio salud | IMPLEMENTADA | `docs/decisions/d-3-tres-capas-de-estado-dominio-salud.md` |

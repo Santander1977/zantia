@@ -9,8 +9,9 @@
 | `tools/` | pytest | Unidad (READ, WRITE, idempotencia, error simulado, NOTIFY) | Tools reales de un dominio (hoy son ficticias) |
 | `core/orchestrator.py` | pytest | Integración end-to-end (flujo normal completo, interrupción por riesgo, prioridad riesgo>resto, no reprocesar tras escalado, idempotencia de mensaje) | Reintentos de tool con backoff real; `AnthropicBrain` en vivo |
 | `observability/` | pytest | Unidad (eventos de transición y guardrail quedan registrados) | Persistencia de eventos entre procesos (hoy es solo en memoria) |
+| `domains/health/` | pytest | Unidad + integración end-to-end (Activity, disponibilidad, reserva/idempotencia, recordatorios 72h/24h/8h, reprogramación, cancelación, no-show, escalamiento, declinación, info no autorizada, ActivityResult/callback idempotente, 2 escenarios e2e completos) | Canal real; `AppointmentService`/`ActivitySource`/`ActivityResultSink` reales (hoy Mock) |
 
-34/34 tests pasando a 2026-09-01 (`.venv/bin/pytest -q`). Ver `/Users/enzoalfonso/recado/006-construccion-zantia.md` para el detalle de qué reproduce cada test respecto a los documentos de arquitectura (002/003/004).
+63/63 tests pasando a 2026-09-01 (`.venv/bin/pytest -q`: 34 Core + 29 dominio salud). Ver `/Users/enzoalfonso/recado/006-construccion-zantia.md` (Core) y `/Users/enzoalfonso/recado/007-agente-demanda-inducida-zantia.md` (dominio salud) para el detalle de qué reproduce cada test.
 
 ## Mínimos obligatorios (heredados de `PROJECT-TEMPLATE`)
 
