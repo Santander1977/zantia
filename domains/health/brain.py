@@ -41,6 +41,18 @@ _INFO_NO_AUTORIZADA = ("mi diagnóstico", "diagnostico", "resultado de mis exame
 _REPROGRAMAR = ("no puedo asistir", "reprogramar", "cambiar la cita", "otro día", "otra fecha")
 _CANCELAR = ("cancelar la cita", "ya no quiero la cita", "cancela mi cita")
 _CONFIRMA = ("confirmo", "sí, confirmo", "asistiré", "voy a asistir", "ahí estaré", "ahí voy a estar", "confirmado", "ahí llego")
+# Gestión "en nombre de otro paciente" (recado 013, extensión de R-15):
+# el titular del canal (ya verificado) declara que la gestión es para
+# un beneficiario distinto. Solo relevante con un AppointmentService que
+# expone `buscar_paciente` (HrmmAppointmentService) — con
+# MockAppointmentService esta frase se ignora, comportamiento idéntico
+# al de antes de esta extensión (requisito #5).
+_PARA_OTRO = (
+    "es para mi mamá", "es para mi mama", "es para mi papá", "es para mi papa",
+    "para mi mamá", "para mi mama", "para mi papá", "para mi papa",
+    "para mi hijo", "para mi hija", "para mi esposa", "para mi esposo",
+    "para otra persona", "no es para mí", "no es para mi",
+)
 
 
 def _contains_any(texto: str, opciones: tuple) -> bool:
@@ -96,6 +108,15 @@ class HealthBrain:
 
         if etapa == "esperando_decision":
             return self._interpretar_decision(texto, datos)
+        if etapa == "esperando_documento_beneficiario":
+            # Usa `message` SIN lowercase (no `texto`): un documento de
+            # identidad es un identificador crudo, no una palabra clave
+            # — lowercasearlo antes de compararlo contra buscar_paciente
+            # podría corromper un documento con letras (encontrado
+            # probando este flujo, ver recado 013).
+            return self._interpretar_documento_beneficiario(message.strip(), datos)
+        if etapa == "esperando_confirmacion_beneficiario":
+            return self._interpretar_confirmacion_beneficiario(texto, datos)
         if etapa == "esperando_seleccion":
             return self._interpretar_seleccion(texto, datos)
         if etapa == "esperando_seleccion_reprogramacion":
@@ -159,38 +180,116 @@ class HealthBrain:
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
             )
 
-        if _contains_any(texto, _ACEPTA):
-            servicio = self._activity.service or "medicina general"
-            opciones = self._appointment_service.get_availability(servicio)[:3]
-            nuevos = {
-                **datos,
-                "etapa": "esperando_seleccion",
-                "opciones_ofrecidas": [o.slot_id for o in opciones],
-            }
-            if not opciones:
-                return BrainOutput(
-                    respuesta_propuesta="Por ahora no tengo horarios disponibles, te contactamos pronto.",
-                    propuesta_de_actualizacion_de_estado={"datos_recopilados": {**datos, "etapa": "finalizada"}},
-                )
-            texto_opciones = "; ".join(
-                f"{i+1}) {o.date} {o.time} en {o.location}" for i, o in enumerate(opciones)
-            )
+        # Gestión para un beneficiario (recado 013) — solo si el
+        # AppointmentService activo puede verificar identidad real
+        # (mismo duck-typing que `resolve_patient_identity` en
+        # gateway.py, sin importar nada de ahí para no acoplar capas).
+        if _contains_any(texto, _PARA_OTRO) and getattr(self._appointment_service, "buscar_paciente", None) is not None:
+            nuevos = {**datos, "etapa": "esperando_documento_beneficiario"}
             return BrainOutput(
-                respuesta_propuesta=f"Perfecto, estas son las opciones disponibles: {texto_opciones}. ¿Cuál prefieres?",
-                # "preguntar_dato_faltante" (no "ejecutar_tool"): todavía
-                # falta la SELECCIÓN del paciente antes de poder reservar
-                # — la tool que se ejecuta aquí es de lectura
-                # (get_availability), no la acción final.
+                senales_detectadas=["gestion_para_beneficiario_declarada"],
+                respuesta_propuesta=(
+                    "Claro, ¿me confirmas el número de documento de identidad "
+                    "de la persona para quien es la cita?"
+                ),
                 proxima_accion_propuesta="preguntar_dato_faltante",
-                tool_requerida={"name": "get_availability", "params": {"service": servicio}},
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
+
+        if _contains_any(texto, _ACEPTA):
+            return self._ofrecer_disponibilidad(datos)
 
         return BrainOutput(
             respuesta_propuesta="¿Te gustaría que te ayude a programar tu atención? Puedes responder sí o no.",
             proxima_accion_propuesta="preguntar_intencion",
             propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
         )
+
+    # ------------------------------------------------------------------
+    def _ofrecer_disponibilidad(self, datos: Dict[str, Any]) -> BrainOutput:
+        """Extraído de la rama `_ACEPTA` de `_interpretar_decision`
+        (recado 013) para que también lo use el flujo de confirmación de
+        beneficiario, sin duplicar la lógica de ofrecer disponibilidad."""
+        servicio = self._activity.service or "medicina general"
+        opciones = self._appointment_service.get_availability(servicio)[:3]
+        nuevos = {
+            **datos,
+            "etapa": "esperando_seleccion",
+            "opciones_ofrecidas": [o.slot_id for o in opciones],
+        }
+        if not opciones:
+            return BrainOutput(
+                respuesta_propuesta="Por ahora no tengo horarios disponibles, te contactamos pronto.",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": {**datos, "etapa": "finalizada"}},
+            )
+        texto_opciones = "; ".join(
+            f"{i+1}) {o.date} {o.time} en {o.location}" for i, o in enumerate(opciones)
+        )
+        return BrainOutput(
+            respuesta_propuesta=f"Perfecto, estas son las opciones disponibles: {texto_opciones}. ¿Cuál prefieres?",
+            # "preguntar_dato_faltante" (no "ejecutar_tool"): todavía
+            # falta la SELECCIÓN del paciente antes de poder reservar
+            # — la tool que se ejecuta aquí es de lectura
+            # (get_availability), no la acción final.
+            proxima_accion_propuesta="preguntar_dato_faltante",
+            tool_requerida={"name": "get_availability", "params": {"service": servicio}},
+            propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+        )
+
+    # ------------------------------------------------------------------
+    def _interpretar_documento_beneficiario(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
+        """Segundo paso del flujo de beneficiario (recado 013): valida
+        el documento contra `buscar_paciente` (mismo endpoint público
+        009, GET /citas/buscar-paciente) ANTES de aceptar el nombre —
+        nunca inventa ni continúa si no hay match real."""
+        documento = texto.strip()
+        buscar = getattr(self._appointment_service, "buscar_paciente", None)
+        identidad = buscar(documento) if buscar and documento else None
+        if identidad is None:
+            return BrainOutput(
+                respuesta_propuesta=(
+                    "No encontré ningún paciente registrado con ese documento. "
+                    "¿Puedes verificarlo y escribirlo de nuevo?"
+                ),
+                proxima_accion_propuesta="preguntar_dato_faltante",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+            )
+        nombre = identidad.get("nombre_paciente") or "esa persona"
+        nuevos = {
+            **datos,
+            "etapa": "esperando_confirmacion_beneficiario",
+            "beneficiario_documento_candidato": documento,
+            "beneficiario_nombre_candidato": nombre,
+        }
+        return BrainOutput(
+            senales_detectadas=["beneficiario_encontrado"],
+            respuesta_propuesta=f"Vamos a agendar para {nombre} — ¿es correcto?",
+            proxima_accion_propuesta="preguntar_dato_faltante",
+            propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+        )
+
+    def _interpretar_confirmacion_beneficiario(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
+        """Tercer paso: el titular confirma explícitamente el nombre
+        antes de continuar (requisito #2, "para que el titular confirme
+        explícitamente... antes de continuar") — cualquier respuesta que
+        no sea una aceptación clara vuelve a pedir el documento, nunca
+        asume un "sí" implícito."""
+        if not _contains_any(texto, _ACEPTA):
+            nuevos = {**datos, "etapa": "esperando_documento_beneficiario"}
+            return BrainOutput(
+                respuesta_propuesta=(
+                    "Entendido, ¿me confirmas el documento correcto de la "
+                    "persona para quien es la cita?"
+                ),
+                proxima_accion_propuesta="preguntar_dato_faltante",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+            )
+        nuevos = {
+            **datos,
+            "beneficiario_documento": datos["beneficiario_documento_candidato"],
+            "beneficiario_nombre": datos["beneficiario_nombre_candidato"],
+        }
+        return self._ofrecer_disponibilidad(nuevos)
 
     # ------------------------------------------------------------------
     def _elegir_opcion(self, texto: str, opciones: List[str]) -> Optional[str]:
@@ -210,6 +309,12 @@ class HealthBrain:
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
             )
         nuevos = {**datos, "etapa": "reservando", "slot_seleccionado": elegida}
+        # Recado 013: si el titular declaró y confirmó un beneficiario,
+        # la reserva se hace a nombre del BENEFICIARIO, nunca del
+        # titular del canal (requisito #3) — `self._activity.patient_reference`
+        # solo se usa cuando no hay beneficiario (comportamiento por
+        # defecto, requisito #5, sin cambios frente a antes de esta extensión).
+        patient_reference_reserva = datos.get("beneficiario_documento") or self._activity.patient_reference
         return BrainOutput(
             respuesta_propuesta="Perfecto, voy a reservarlo — un momento.",
             proxima_accion_propuesta="ejecutar_tool",
@@ -217,7 +322,7 @@ class HealthBrain:
                 "name": "book_appointment",
                 "params": {
                     "slot_id": elegida,
-                    "patient_reference": self._activity.patient_reference,
+                    "patient_reference": patient_reference_reserva,
                     "idempotency_key": f"{self._activity.activity_id}:booking",
                 },
             },

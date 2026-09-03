@@ -16,6 +16,7 @@ Contrato real confirmado (no asumido):
 - GET  /api/agenda/citas/buscar-paciente  — público, ?documento=... -> {nombre_paciente, telefono}
 - GET  /api/agenda/servicios, /medicos    — públicos (ver hrmm_catalog.py)
 - POST /api/agenda/verificacion/enviar    — requiere X-Backend-Secret, body {documento_paciente} -> código de 6 dígitos por CORREO (vía webhook n8n, TTL 10 min, 5 intentos, un solo uso)
+- POST /api/agenda/verificacion/confirmar — [PROPUESTO, NO CONFIRMADO] contrato mínimo que ZANTIA necesita para verificar identidad de canal (recado 014) sin estar atado a cancelar/reprogramar una cita. A diferencia del resto de este archivo (verificado leyendo el código fuente real de hrmm-backend), este endpoint TODAVÍA NO EXISTE ahí: `app/recovery_codes.py:verificar_codigo(documento_paciente, codigo)` es genérico (no depende de ninguna cita), pero hoy solo se invoca dentro de `cancelar_cita`/`reprogramar_cita` (`app/api/agenda.py`), ambos con `cita_id` obligatorio en la URL. Decisión explícita del usuario (2026-09-02): construir el lado ZANTIA contra este contrato documentado, y coordinar el endpoint real como trabajo aparte en el repositorio de hrmm-backend antes de desplegar `confirm_verification_code` contra la red real — ver `.ai/RISKS.md` (riesgo nuevo, bloqueante) y `domains/health/identity_store.py`.
 
 Identidad: hrmm-backend identifica pacientes por `documento_paciente`
 (texto libre, sin formato validado). Convención de este adaptador,
@@ -35,11 +36,14 @@ from .hrmm_catalog import CatalogMirror
 from .hrmm_http import HttpClient, HttpError
 from .models import Appointment, AppointmentStatus, AvailabilitySlot
 
-# INFERENCIA (no confirmada contra datos reales — el código fuente
-# tipa `estado` como `str` libre, sin enum documentado): mapeo
-# best-effort de los valores en español más probables a
-# AppointmentStatus. PENDIENTE DE VALIDACIÓN contra respuestas reales
-# de hrmm-backend antes de confiar en él para lógica crítica.
+# PENDIENTE DE VALIDACIÓN (sigue siendo INFERENCIA, no confirmada):
+# el código fuente tipa `Cita.estado` como `str` libre, sin enum
+# documentado, y `GET /api/agenda/citas` (el único endpoint que
+# devuelve este campo) exige `X-Backend-Secret` — no se llamó en esta
+# sesión (2026-09-01) por decisión explícita del usuario de no usar el
+# secreto de escritura. Confirmado por HTTP real: sin secreto responde
+# 401 "No autorizado." (ver recado 010). Mapeo best-effort de los
+# valores en español más probables a AppointmentStatus, sin confirmar.
 _MAPA_ESTADO_HRMM: Dict[str, AppointmentStatus] = {
     "reservada": AppointmentStatus.CONFIRMED,
     "confirmada": AppointmentStatus.CONFIRMED,
@@ -142,9 +146,16 @@ class HrmmAppointmentService:
         for bloque in respuesta.body:
             if bloque.get("servicio_id") != servicio_id:
                 continue
+            # HECHO (2026-09-01, ver recado 010): se confirmó por HTTP real
+            # contra producción de hrmm-backend (GET /api/agenda/disponibilidad,
+            # sin filtros, 10311 bloques) que `BloqueDisponibilidad.estado`
+            # SOLO toma dos valores reales: "Libre" y "Reservado". Se usa un
+            # allowlist explícito (solo "libre" se ofrece) en vez del denylist
+            # anterior por substring — así un valor nuevo/no contemplado se
+            # excluye por defecto (conservador) en vez de ofrecerse por error.
             estado = str(bloque.get("estado", "")).strip().lower()
-            if estado and ("ocupad" in estado or "reservad" in estado):
-                continue  # INFERENCIA: solo se excluyen estados que claramente indican "no disponible"
+            if estado != "libre":
+                continue
             medico = self._catalog.medico(bloque["medico_id"])
             consultorio = medico.consultorio if medico else None
             if location is not None and (consultorio or "").strip().lower() != location.strip().lower():
@@ -277,6 +288,28 @@ class HrmmAppointmentService:
         if respuesta.status != 200:
             raise AppointmentServiceError(f"verificacion/enviar respondió {respuesta.status}: {respuesta.body}")
         return respuesta.body  # {"enviado": bool, "mensaje": str, "correo_parcial": Optional[str]}
+
+    def confirm_verification_code(self, documento_paciente: str, codigo: str) -> bool:
+        """POST /api/agenda/verificacion/confirmar — [PROPUESTO, ver
+        docstring del módulo]: confirma (y consume, un solo uso) un
+        código de verificación SIN atarlo a cancelar/reprogramar una
+        cita — necesario para el gate de identidad de canal (recado
+        014, `domains/health/identity_store.py`). Se asume 200 =
+        válido, 401 = inválido/vencido/agotado (mismo código que ya
+        usan `cancelar`/`reprogramar` para el mismo caso, ver
+        `cancel_appointment_verified`) — nunca se inventa un tercer
+        estado."""
+        respuesta = self._http.request(
+            "POST",
+            "/api/agenda/verificacion/confirmar",
+            json_body={"documento_paciente": documento_paciente, "codigo": codigo},
+            headers=self._headers_confianza(),
+        )
+        if respuesta.status == 200:
+            return True
+        if respuesta.status == 401:
+            return False
+        raise AppointmentServiceError(f"verificacion/confirmar respondió {respuesta.status}: {respuesta.body}")
 
     def cancel_appointment_verified(self, appointment_id: str, documento_paciente: str, codigo: str) -> Appointment:
         respuesta = self._http.request(

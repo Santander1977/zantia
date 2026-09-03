@@ -39,8 +39,8 @@ def _generador_basico(citas_por_documento=None, extra=None):
             return HttpResponse(200, [{"medico_id": "M1", "nombre_completo": "Dra. Ana Pérez", "servicio_id": "S1", "consultorio": "Consultorio 3"}])
         if method == "GET" and path == "/api/agenda/disponibilidad":
             return HttpResponse(200, [
-                {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "disponible"},
-                {"slot_id": "SLOT2", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-11", "hora_inicio": "10:00", "hora_fin": "10:30", "estado": "disponible"},
+                {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Libre"},
+                {"slot_id": "SLOT2", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-11", "hora_inicio": "10:00", "hora_fin": "10:30", "estado": "Libre"},
             ])
         if method == "GET" and path == "/api/agenda/citas":
             documento = params.get("documento_paciente")

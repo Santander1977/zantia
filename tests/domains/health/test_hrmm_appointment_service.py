@@ -69,7 +69,7 @@ def test_get_availability_traduce_ids_del_catalogo(http, service):
     http.programar(
         "GET", "/api/agenda/disponibilidad",
         HttpResponse(200, [
-            {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "disponible"}
+            {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Libre"}
         ]),
     )
     slots = service.get_availability("medicina general")
@@ -88,8 +88,23 @@ def test_get_availability_excluye_bloques_ocupados(http, service):
     http.programar(
         "GET", "/api/agenda/disponibilidad",
         HttpResponse(200, [
-            {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "ocupado"},
-            {"slot_id": "SLOT2", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "10:00", "hora_fin": "10:30", "estado": "disponible"},
+            {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Reservado"},
+            {"slot_id": "SLOT2", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "10:00", "hora_fin": "10:30", "estado": "Libre"},
+        ]),
+    )
+    slots = service.get_availability("medicina general")
+    assert [s.slot_id for s in slots] == ["SLOT2"]
+
+
+def test_get_availability_excluye_estado_no_contemplado(http, service):
+    """Allowlist explícito (recado 010): un valor de `estado` que no es
+    "Libre" se excluye por defecto, conservador, aunque no coincida con
+    ningún valor conocido — nunca se ofrece un slot por error."""
+    http.programar(
+        "GET", "/api/agenda/disponibilidad",
+        HttpResponse(200, [
+            {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Bloqueado"},
+            {"slot_id": "SLOT2", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "10:00", "hora_fin": "10:30", "estado": "Libre"},
         ]),
     )
     slots = service.get_availability("medicina general")
@@ -98,7 +113,7 @@ def test_get_availability_excluye_bloques_ocupados(http, service):
 
 def test_book_appointment_exitoso(http, service):
     http.programar("GET", "/api/agenda/disponibilidad", HttpResponse(200, [
-        {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "disponible"}
+        {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Libre"}
     ]))
     http.programar("GET", "/api/agenda/citas", HttpResponse(200, []))
     http.programar("POST", "/api/agenda/citas", HttpResponse(201, _CITA_BASE))
@@ -113,7 +128,7 @@ def test_book_appointment_exitoso(http, service):
 
 def test_book_appointment_idempotente_por_clave(http, service):
     http.programar("GET", "/api/agenda/disponibilidad", HttpResponse(200, [
-        {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "disponible"}
+        {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Libre"}
     ]))
     http.programar("GET", "/api/agenda/citas", HttpResponse(200, []))
     http.programar("POST", "/api/agenda/citas", HttpResponse(201, _CITA_BASE))
@@ -135,7 +150,7 @@ def test_book_appointment_no_duplica_cita_activa_equivalente(http, service):
     si ya existe una cita activa del mismo paciente/servicio/fecha, no
     se crea una nueva."""
     http.programar("GET", "/api/agenda/disponibilidad", HttpResponse(200, [
-        {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "disponible"}
+        {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Libre"}
     ]))
     http.programar("GET", "/api/agenda/citas", HttpResponse(200, [_CITA_BASE]))  # ya existe una activa
 
@@ -169,6 +184,27 @@ def test_send_verification_code(http, service):
     assert resultado["correo_parcial"] == "j***@dominio.com"
     cabeceras = http.llamadas[-1]["headers"]
     assert cabeceras["X-Backend-Secret"] == "secreto-de-prueba-no-real"
+
+
+def test_confirm_verification_code_valido(http, service):
+    """Recado 014 — contrato PROPUESTO (ver docstring del módulo), no
+    confirmado todavía contra hrmm-backend real."""
+    http.programar("POST", "/api/agenda/verificacion/confirmar", HttpResponse(200, {"valido": True}))
+    assert service.confirm_verification_code("123456", "654321") is True
+    llamada = http.llamadas[-1]
+    assert llamada["json_body"] == {"documento_paciente": "123456", "codigo": "654321"}
+    assert llamada["headers"]["X-Backend-Secret"] == "secreto-de-prueba-no-real"
+
+
+def test_confirm_verification_code_invalido(http, service):
+    http.programar("POST", "/api/agenda/verificacion/confirmar", HttpResponse(401, {"detail": "codigo invalido o vencido"}))
+    assert service.confirm_verification_code("123456", "000000") is False
+
+
+def test_confirm_verification_code_error_inesperado(http, service):
+    http.programar("POST", "/api/agenda/verificacion/confirmar", HttpResponse(500, {"detail": "error"}))
+    with pytest.raises(AppointmentServiceError):
+        service.confirm_verification_code("123456", "654321")
 
 
 def test_cancel_appointment_verified_con_codigo_invalido(http, service):

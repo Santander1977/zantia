@@ -193,6 +193,23 @@ def handle_patient_message(context: HealthAgentContext, message_id: str, text: s
             evento = "APPOINTMENT_CONFIRMED" if just_booked else "APPOINTMENT_RESCHEDULED"
             context.orchestrator.events.record(context.activity.activity_id, EventType.STATE_TRANSITION, evento=evento)
 
+            # Auditoría de gestión-en-nombre-de-otro (recado 013, R-15
+            # extendido): solo se registra cuando el titular declaró y
+            # confirmó un beneficiario — el caso por defecto (titular
+            # gestiona para sí mismo) no gana ningún evento nuevo, cero
+            # cambio de comportamiento (requisito #5). Gestor y
+            # beneficiario quedan SIEMPRE separados en campos propios,
+            # nunca fusionados en uno solo (requisito #4).
+            beneficiario_documento = resultado.state.datos_recopilados.get("beneficiario_documento")
+            if just_booked and beneficiario_documento:
+                context.orchestrator.events.record(
+                    context.activity.activity_id,
+                    EventType.STATE_TRANSITION,
+                    evento="GESTION_EN_NOMBRE_DE_BENEFICIARIO",
+                    gestor_documento=context.activity.patient_reference,
+                    beneficiario_documento=beneficiario_documento,
+                )
+
     if etapa_actual == "cancelando" and _tool_exitosa(resultados_tools, "cancel_appointment", "CANCELLED"):
         context.orchestrator.events.record(
             context.activity.activity_id, EventType.STATE_TRANSITION, evento="APPOINTMENT_CANCELLED"

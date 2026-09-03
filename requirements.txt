@@ -4,6 +4,14 @@
 
 pydantic>=2,<3
 pytest>=8,<9
+httpx>=0.27,<0.28  # requerido por fastapi.testclient.TestClient (smoke test de service/app.py)
+
+# Capa de transporte HTTP del proceso (service/app.py) — decisión D-5
+# (docs/decisions/d-5-empaquetado-fastapi-chatwoot.md). Mismo patrón
+# que hrmm-backend/panel-admin en este ecosistema. El Core y los
+# dominios (core/, domains/) NO dependen de esto — solo el entrypoint.
+fastapi>=0.115,<0.116
+uvicorn>=0.30,<0.31
 
 # Opcional — solo necesaria si se usa core/brain.py:AnthropicBrain con
 # un modelo real. NO se instala por defecto ni es requerida para correr

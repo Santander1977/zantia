@@ -32,6 +32,7 @@ from .activity_source import ActivitySource
 from .agent import HealthAgentContext, build_health_agent_context, handle_patient_message
 from .appointment_service import AppointmentService, AppointmentStatus
 from .confirmation import ConfirmationTracker
+from .identity_store import EstadoIdentidadCanal, IdentidadCanalStore, SQLiteIdentidadCanalStore
 from .intent import classify_intent
 from .models import Activity, ActivityStatus, PatientRequest, RequestIntent, RequestStatus
 from .patient_request_source import MockPatientRequestSource, PatientRequestSource
@@ -62,6 +63,14 @@ _MENSAJE_INFORMACION_GENERICA = (
     "¿Qué necesitas?"
 )
 
+# Canales cuyo identificador (`patient_reference`) NO es un documento de
+# identidad (recado 012, R-15) — hoy solo ChatwootChannel (número de
+# WhatsApp, ver `channels/chatwoot_channel.py:ChatwootChannel.canal`).
+# Deliberadamente explícito (allowlist), no inferido del nombre del
+# canal, para no gatear por accidente un canal futuro que sí entregue
+# el documento directamente.
+_CANALES_SIN_IDENTIFICADOR_DOCUMENTO = {"chatwoot"}
+
 
 @dataclass
 class HealthGateway:
@@ -74,6 +83,13 @@ class HealthGateway:
     result_sink: ActivityResultSink
     confirmation_tracker: ConfirmationTracker = field(default_factory=ConfirmationTracker)
     patient_request_source: PatientRequestSource = field(default_factory=MockPatientRequestSource)
+    # Identidad del CANAL persistente entre conversaciones (recado 014,
+    # extensión de R-15) — ver docstring de `domains/health/identity_store.py`
+    # sobre por qué es un store propio, independiente del StateStore por
+    # Activity. Default seguro (`:memory:`, sin persistencia real) para
+    # cuando no se construye explícitamente (tests, demo) — en
+    # producción `service/app.py` inyecta uno real vía `build_identity_store()`.
+    identity_store: IdentidadCanalStore = field(default_factory=lambda: SQLiteIdentidadCanalStore(":memory:"))
     # Correlación (el mecanismo que el documento fuente no especificaba):
     # patient_reference -> conversation_id de la conversación abierta vigente.
     _open_conversations: Dict[str, str] = field(default_factory=dict)
@@ -88,8 +104,16 @@ class HealthGateway:
     _pending_verifications: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # patient_reference -> documento_paciente ya resuelto (identidad
     # real cuando se usa HrmmAppointmentService — ver
-    # `resolve_patient_identity`).
+    # `resolve_patient_identity`). Declarado en 009, conectado en 012
+    # (R-15): mientras un identificador de canal (ej. número de
+    # WhatsApp) no tenga entrada aquí, se le pide el documento antes de
+    # continuar — ver `_pending_identity` y `_gestionar_identificacion`.
     _identidad_resuelta: Dict[str, str] = field(default_factory=dict)
+    # patient_reference -> {"channel": str, "intentos": int}. Solo
+    # existe mientras se está pidiendo/validando el documento de un
+    # identificador de canal nuevo (recado 012, R-15) — se borra en
+    # cuanto se resuelve (éxito) o se escala (máximo de intentos).
+    _pending_identity: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 def build_health_gateway(
@@ -97,12 +121,17 @@ def build_health_gateway(
     appointment_service: AppointmentService,
     reminder_manager: ReminderManager,
     result_sink: ActivityResultSink,
+    identity_store: Optional[IdentidadCanalStore] = None,
 ) -> HealthGateway:
+    kwargs: Dict[str, Any] = {}
+    if identity_store is not None:
+        kwargs["identity_store"] = identity_store
     return HealthGateway(
         activity_source=activity_source,
         appointment_service=appointment_service,
         reminder_manager=reminder_manager,
         result_sink=result_sink,
+        **kwargs,
     )
 
 
@@ -220,6 +249,43 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
         _cerrar_si_definitivo(gateway, contexto_existente)
         return respuesta
 
+    # Gate de identidad (recado 012, R-15): solo aplica cuando (a) el
+    # AppointmentService activo distingue el identificador de canal del
+    # documento real del paciente (HrmmAppointmentService, detectado por
+    # duck-typing igual que `resolve_patient_identity` — con
+    # MockAppointmentService nunca se activa, cero impacto en el camino
+    # Mock/demo ya probado) Y (b) el CANAL concreto es de los que
+    # entregan un identificador que NO es un documento (ej. un número de
+    # WhatsApp vía ChatwootChannel — requisito explícito del usuario,
+    # "ChatwootChannel, específicamente"). Otros canales (ej. "demo",
+    # usados por la suite existente con HrmmAppointmentService) siguen
+    # asumiendo patient_reference == documento, exactamente como antes
+    # de esta extensión — no se generaliza el gate a todos los canales
+    # sin evidencia de que lo necesiten. Nunca se llega aquí si YA hay
+    # una conversación abierta (ver arriba) — el camino Activity/outbound
+    # nunca pasa por `handle_inbound_message` y no se ve afectado
+    # (`require_document_on_activity`, sin tocar).
+    # Reconocimiento inmediato en un contacto SIGUIENTE (recado 014,
+    # extensión de R-15): si este identificador de canal ya tiene una
+    # fila VERIFICADO en `identity_store` (persistente — sobrevive a un
+    # reinicio del proceso, a diferencia de `_identidad_resuelta`, que
+    # es solo caché en memoria de ESTE proceso), se puebla directamente
+    # ANTES del gate de abajo — nunca se vuelve a pedir documento ni
+    # código. Mismo duck-typing que el resto del gate: solo aplica
+    # cuando el AppointmentService activo distingue identificador de
+    # canal de documento real.
+    if patient_reference not in gateway._identidad_resuelta and _requiere_identidad_real(gateway):
+        registro = gateway.identity_store.get(patient_reference)
+        if registro is not None and registro.estado == EstadoIdentidadCanal.VERIFICADO:
+            gateway._identidad_resuelta[patient_reference] = registro.documento
+
+    if (
+        channel in _CANALES_SIN_IDENTIFICADOR_DOCUMENTO
+        and _requiere_identidad_real(gateway)
+        and patient_reference not in gateway._identidad_resuelta
+    ):
+        return _gestionar_identificacion(gateway, patient_reference, channel, text)
+
     # No hay conversación abierta -> es una PatientRequest genuina.
     intent = classify_intent(text)
     request = gateway.patient_request_source.create(
@@ -256,7 +322,8 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
 
 def _resolver_programar_cita(gateway: HealthGateway, request: PatientRequest, channel: str, message_id: str, text: str) -> str:
     activity = _nueva_activity_sintetica(
-        request.patient_reference, channel, objective="Solicitud del paciente: programar cita"
+        _documento_resuelto(gateway, request.patient_reference), channel,
+        objective="Solicitud del paciente: programar cita",
     )
     activity = gateway.activity_source.create(activity)
     context = build_health_agent_context(
@@ -284,7 +351,7 @@ def _resolver_gestion_de_cita_existente(
 ) -> str:
     citas_activas = [
         a
-        for a in gateway.appointment_service.get_patient_appointments(request.patient_reference)
+        for a in gateway.appointment_service.get_patient_appointments(_documento_resuelto(gateway, request.patient_reference))
         if a.status in (AppointmentStatus.CONFIRMED, AppointmentStatus.RESCHEDULED)
     ]
     if not citas_activas:
@@ -306,7 +373,7 @@ def _resolver_gestion_de_cita_existente(
         return _iniciar_verificacion_para_gestion(gateway, request, cita)
 
     activity = _nueva_activity_sintetica(
-        request.patient_reference, channel,
+        _documento_resuelto(gateway, request.patient_reference), channel,
         objective="Solicitud del paciente: gestionar cita existente",
         appointment_id=cita.appointment_id,
         service=cita.service,
@@ -384,7 +451,7 @@ def _resolver_consulta(gateway: HealthGateway, request: PatientRequest) -> str:
     consulta de lectura pura, no requiere máquina de estados)."""
     citas = [
         a
-        for a in gateway.appointment_service.get_patient_appointments(request.patient_reference)
+        for a in gateway.appointment_service.get_patient_appointments(_documento_resuelto(gateway, request.patient_reference))
         if a.status in (AppointmentStatus.CONFIRMED, AppointmentStatus.RESCHEDULED)
     ]
     gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
@@ -399,7 +466,7 @@ def _resolver_confirmacion(gateway: HealthGateway, request: PatientRequest) -> s
     de recordatorio) — también determinista y directa."""
     citas_activas = [
         a
-        for a in gateway.appointment_service.get_patient_appointments(request.patient_reference)
+        for a in gateway.appointment_service.get_patient_appointments(_documento_resuelto(gateway, request.patient_reference))
         if a.status in (AppointmentStatus.CONFIRMED, AppointmentStatus.RESCHEDULED)
     ]
     gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
@@ -438,7 +505,12 @@ def _elegir_opcion_ordinal(texto: str, opciones: list) -> Optional[str]:
 
 
 def _iniciar_verificacion_para_gestion(gateway: HealthGateway, request: PatientRequest, cita) -> str:
-    documento = request.patient_reference  # convención Hrmm: patient_reference == documento_paciente
+    # Antes de 012/R-15 se asumía patient_reference == documento_paciente
+    # siempre; con un canal real (ej. WhatsApp vía ChatwootChannel),
+    # patient_reference es el identificador de canal — el documento real
+    # ya quedó resuelto por el gate de identidad (`_gestionar_identificacion`)
+    # antes de que este código sea alcanzable, y vive en `_identidad_resuelta`.
+    documento = _documento_resuelto(gateway, request.patient_reference)
     accion = "cancelar" if request.intent == RequestIntent.CANCELAR_CITA else "reprogramar"
 
     if accion == "reprogramar":
@@ -571,6 +643,173 @@ def resolve_patient_identity(gateway: HealthGateway, documento_paciente: str) ->
     if buscar is None:
         return None  # MockAppointmentService no tiene este concepto
     return buscar(documento_paciente)
+
+
+# ---------------------------------------------------------------------
+# Gate de identidad para el camino INBOUND por canal real (recado 012,
+# R-15). Brecha encontrada al conectar ChatwootChannel: patient_reference
+# ahí es el número de WhatsApp, pero el resto de este archivo (y
+# HrmmAppointmentService, D-4) asume patient_reference == documento_paciente.
+# Decisión de producto YA TOMADA por el usuario para esta fase: pedir el
+# documento explícitamente en el primer turno de una conversación nueva
+# por un canal así, ANTES de procesar cualquier intención — nunca inventar
+# ni asumir.
+#
+# EXTENDIDO en recado 014 (2026-09-02): el resultado de este gate ya no
+# se guarda solo en memoria del proceso (`_identidad_resuelta`) — se
+# confirma con un código de verificación (`_iniciar_verificacion_de_identidad`
+# / `_procesar_codigo_de_identificacion`) y se persiste en
+# `identity_store` (`domains/health/identity_store.py`), para que un
+# contacto SIGUIENTE del mismo teléfono (otro día, u otro proceso) sea
+# reconocido de inmediato sin repetir el wizard — ver la hidratación al
+# inicio de `handle_inbound_message`. Esto SÍ negocia un endpoint nuevo
+# con hrmm-backend (`POST /api/agenda/verificacion/confirmar`), pero
+# como contrato PROPUESTO/coordinado, nunca inventado en silencio — ver
+# docstring de `HrmmAppointmentService.confirm_verification_code` y
+# `.ai/RISKS.md`.
+# ---------------------------------------------------------------------
+_MAX_INTENTOS_IDENTIFICACION = 3
+
+_MENSAJE_PEDIR_DOCUMENTO = (
+    "Antes de continuar, ¿me confirmas tu número de documento de identidad? "
+    "Lo necesito para consultar tus datos de forma segura."
+)
+_MENSAJE_IDENTIDAD_CONFIRMADA = (
+    "Gracias, ya confirmé tu identidad. ¿En qué te puedo ayudar? "
+    "Puedo programar, reprogramar, cancelar o consultar una cita."
+)
+_MENSAJE_DOCUMENTO_NO_ENCONTRADO = (
+    "No encontré ningún paciente registrado con ese documento. "
+    "¿Puedes verificarlo y escribirlo de nuevo?"
+)
+
+
+def _requiere_identidad_real(gateway: HealthGateway) -> bool:
+    """Mismo duck-typing que `resolve_patient_identity`: solo los
+    AppointmentService que distinguen identificador de canal de
+    documento real (HrmmAppointmentService, vía `buscar_paciente`)
+    necesitan este gate — con MockAppointmentService nunca se activa,
+    cero cambio de comportamiento para toda la suite existente."""
+    return getattr(gateway.appointment_service, "buscar_paciente", None) is not None
+
+
+def _documento_resuelto(gateway: HealthGateway, patient_reference: str) -> str:
+    """El documento real ya asociado a este identificador de canal, si
+    se resolvió (ver `_gestionar_identificacion`) — o `patient_reference`
+    tal cual si no hace falta resolución (MockAppointmentService, o un
+    AppointmentService donde patient_reference YA es el documento,
+    comportamiento idéntico al de antes de esta extensión)."""
+    return gateway._identidad_resuelta.get(patient_reference, patient_reference)
+
+
+def _gestionar_identificacion(gateway: HealthGateway, patient_reference: str, channel: str, text: str) -> str:
+    """Wizard determinista de 3 pasos (pedir documento -> validar contra
+    buscar-paciente -> confirmar con código de verificación, recado
+    014), mismo criterio que el sub-flujo de verificación por código:
+    independiente de ConversationState/Orchestrator/HealthBrain, con
+    estado propio en `HealthGateway` (mismo patrón que
+    `_pending_verifications`, para no duplicar un mecanismo de
+    persistencia nuevo — `ConversationState` no existe todavía en este
+    punto, la identidad se resuelve ANTES de crear cualquier
+    Activity/PatientRequest). El resultado FINAL (paso 3, código
+    válido) es lo único que se escribe en `identity_store` como
+    VERIFICADO — ver `_iniciar_verificacion_de_identidad` y
+    `_procesar_codigo_de_identificacion`."""
+    pendiente = gateway._pending_identity.get(patient_reference)
+    if pendiente is None:
+        gateway._pending_identity[patient_reference] = {
+            "channel": channel, "intentos": 0, "stage": "esperando_documento",
+        }
+        return _MENSAJE_PEDIR_DOCUMENTO
+
+    if pendiente.get("stage") == "esperando_codigo":
+        return _procesar_codigo_de_identificacion(gateway, patient_reference, pendiente, text)
+
+    documento = text.strip()
+    identidad = resolve_patient_identity(gateway, documento) if documento else None
+    if identidad is not None:
+        return _iniciar_verificacion_de_identidad(gateway, patient_reference, documento)
+
+    pendiente["intentos"] += 1
+    if pendiente["intentos"] >= _MAX_INTENTOS_IDENTIFICACION:
+        del gateway._pending_identity[patient_reference]
+        # Mecanismo de escalamiento YA EXISTENTE en este archivo (el
+        # mismo que usa RequestIntent.ESCALAMIENTO más abajo) — nunca se
+        # deja la conversación en un limbo sin salida.
+        gateway.patient_request_source.create(
+            PatientRequest(
+                request_id=f"REQ-{uuid.uuid4().hex[:10]}",
+                patient_reference=patient_reference,
+                intent=RequestIntent.ESCALAMIENTO,
+                channel=channel,
+                status=RequestStatus.ESCALADA,
+            )
+        )
+        return _MENSAJE_ESCALAMIENTO_INBOUND
+
+    return _MENSAJE_DOCUMENTO_NO_ENCONTRADO
+
+
+def _iniciar_verificacion_de_identidad(gateway: HealthGateway, patient_reference: str, documento: str) -> str:
+    """Documento confirmado contra buscar-paciente — antes de asociarlo
+    como confiable (recado 014, requisito #2c), se exige un segundo
+    factor: código de 6 dígitos al correo del paciente (mismo mecanismo
+    ya construido en 009 para cancelar/reprogramar,
+    `send_verification_code` — sin inventar uno nuevo). Se registra la
+    fila PENDIENTE_VERIFICACION en `identity_store` desde ya (requisito
+    #1: la tabla debe reflejar el estado intermedio, no solo el final)."""
+    from .appointment_service import AppointmentServiceError
+
+    gateway.identity_store.guardar_pendiente(patient_reference, documento)
+    try:
+        resultado_envio = gateway.appointment_service.send_verification_code(documento)
+    except AppointmentServiceError as exc:
+        # No se pierde el progreso (documento ya validado, sigue en
+        # `_pending_identity` en etapa "esperando_documento") — el
+        # paciente puede simplemente reintentar el mismo documento.
+        return f"No pude enviarte el código de verificación ({exc}). Intenta de nuevo en un momento."
+
+    canal_original = gateway._pending_identity[patient_reference]["channel"]
+    gateway._pending_identity[patient_reference] = {
+        "channel": canal_original,
+        "intentos": 0,
+        "stage": "esperando_codigo",
+        "documento_candidato": documento,
+    }
+    correo_parcial = resultado_envio.get("correo_parcial")
+    pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
+    return f"Te enviamos un código{pista} para confirmar tu identidad. Escríbelo aquí para continuar."
+
+
+def _procesar_codigo_de_identificacion(
+    gateway: HealthGateway, patient_reference: str, pendiente: Dict[str, Any], text: str
+) -> str:
+    """Último paso del wizard (recado 014, requisito #2d): código
+    correcto -> `identity_store.marcar_verificado` (única escritura de
+    estado=VERIFICADO en todo el archivo) + puebla `_identidad_resuelta`
+    para el resto de esta conversación, igual que antes de esta
+    extensión. Código incorrecto/vencido -> se permite reintentar, SIN
+    inventar un contador propio de intentos encima del que ya exige
+    `send_verification_code`/`recovery_codes.py` del lado de
+    hrmm-backend (5 intentos, TTL 10 min) — ese mecanismo ya decide
+    cuándo un código deja de ser válido; este código solo refleja su
+    resultado."""
+    from .appointment_service import AppointmentServiceError
+
+    documento = pendiente["documento_candidato"]
+    codigo = text.strip()
+    try:
+        valido = gateway.appointment_service.confirm_verification_code(documento, codigo)
+    except AppointmentServiceError as exc:
+        return f"No pude confirmar el código ({exc}). Intenta de nuevo en un momento."
+
+    if not valido:
+        return _MENSAJE_CODIGO_INVALIDO
+
+    del gateway._pending_identity[patient_reference]
+    gateway.identity_store.marcar_verificado(patient_reference, documento)
+    gateway._identidad_resuelta[patient_reference] = documento
+    return _MENSAJE_IDENTIDAD_CONFIRMADA
 
 
 def require_document_on_activity(activity: Activity) -> str:

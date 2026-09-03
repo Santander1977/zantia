@@ -22,6 +22,13 @@ from .gateway import (
     register_context,
     start_activity_and_register,
 )
+from .identity_store import (
+    EstadoIdentidadCanal,
+    IdentidadCanal,
+    IdentidadCanalStore,
+    SQLiteIdentidadCanalStore,
+    build_identity_store,
+)
 from .intent import classify_intent
 from .models import (
     Activity,
@@ -67,6 +74,11 @@ __all__ = [
     "handle_inbound_message",
     "register_context",
     "start_activity_and_register",
+    "EstadoIdentidadCanal",
+    "IdentidadCanal",
+    "IdentidadCanalStore",
+    "SQLiteIdentidadCanalStore",
+    "build_identity_store",
     "classify_intent",
     "Activity",
     "ActivityResult",
