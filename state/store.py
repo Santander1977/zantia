@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from pathlib import Path
 from typing import Optional, Protocol
 
 from .models import ConversationState
@@ -88,6 +89,12 @@ class SQLiteStateStore:
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self._db_path = db_path
+        if db_path != ":memory:":
+            # sqlite3.connect no crea directorios intermedios — sin esto,
+            # una ZANTIA_DB_PATH apuntando a una carpeta que todavía no
+            # existe (ej. primer deploy) rompe con un error críptico en
+            # el primer mensaje real en vez de al arrancar el proceso.
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False: el MVP es de un solo proceso/hilo por
         # conversación en la práctica; se documenta como simplificación.
         self._conn = sqlite3.connect(db_path, check_same_thread=False)

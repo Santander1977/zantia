@@ -53,6 +53,20 @@ _PARA_OTRO = (
     "para mi hijo", "para mi hija", "para mi esposa", "para mi esposo",
     "para otra persona", "no es para mí", "no es para mi",
 )
+# Olvido de identidad de canal (recado 016, extensión de R-20) — pedido
+# explícito del paciente de que se elimine su asociación teléfono↔documento
+# (`domains/health/identity_store.py`). Conjunto razonable de frases
+# coloquiales en español (requisito #1 del pedido), no exhaustivo — mismo
+# criterio que el resto de los conjuntos de este archivo (palabras clave,
+# no NLU real, ver `.ai/RISKS.md` R-13).
+_OLVIDAR = (
+    "olvida mi número", "olvida mi numero", "olvida mi información", "olvida mi informacion",
+    "olvida mis datos", "olvídame", "olvidame",
+    "borra mi número", "borra mi numero", "borra mi información", "borra mi informacion",
+    "borra mis datos",
+    "elimina mi información", "elimina mi informacion", "elimina mis datos",
+    "no quiero que tengas mis datos", "deja de guardar mis datos",
+)
 
 
 def _contains_any(texto: str, opciones: tuple) -> bool:
@@ -80,6 +94,21 @@ class HealthBrain:
         texto = message.lower().strip()
         datos = dict(state.datos_recopilados)
         etapa = datos.get("etapa", "esperando_decision")
+
+        # Olvido de identidad de canal (recado 016, extensión de R-20):
+        # se reconoce en CUALQUIER etapa, con la MISMA prioridad que el
+        # Core ya le da a una interrupción global (riesgo/escalamiento,
+        # 004 sección 9) — ni siquiera depende de que haya una cita
+        # reservada, a diferencia de reprogramar/cancelar/confirmar
+        # abajo. `datos_recopilados["etapa"] == "confirmando_olvido"` es
+        # un wizard de un solo paso PROPIO (no forma parte de ninguna
+        # otra máquina de etapas existente) que se resuelve antes que
+        # cualquier otra cosa, para no perder la confirmación pendiente
+        # si el paciente escribe algo ambiguo mientras tanto.
+        if etapa == "confirmando_olvido":
+            return self._interpretar_confirmacion_olvido(texto, datos)
+        if _contains_any(texto, _OLVIDAR):
+            return self._iniciar_olvido(datos, etapa)
 
         # Reprogramar/cancelar/confirmar se reconocen en cualquier etapa
         # posterior a una cita ya reservada (equivalente sano a la
@@ -390,5 +419,64 @@ class HealthBrain:
                 "name": "cancel_appointment",
                 "params": {"appointment_id": self._activity.appointment_id},
             },
+            propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+        )
+
+    # ------------------------------------------------------------------
+    # Olvido de identidad de canal (recado 016, extensión de R-20).
+    # Wizard de 2 pasos, análogo en espíritu al de beneficiario (013)
+    # pero deliberadamente SIN tocar ninguno de sus campos/etapas
+    # (requisito #5: no debe interferir con la gestión de beneficiario).
+    # Nunca propone `tool_requerida`: el borrado real no es una tool del
+    # Protocol `AppointmentService` — lo ejecuta `gateway.py` (que sí
+    # tiene acceso a `identity_store`) al ver `etapa == "olvido_confirmado"`,
+    # ver `_procesar_olvido_si_corresponde`. Este Brain solo PROPONE.
+    # ------------------------------------------------------------------
+    def _iniciar_olvido(self, datos: Dict[str, Any], etapa_anterior: str) -> BrainOutput:
+        nuevos = {**datos, "etapa": "confirmando_olvido", "etapa_antes_de_olvido": etapa_anterior}
+        return BrainOutput(
+            senales_detectadas=["olvido_de_identidad_solicitado"],
+            respuesta_propuesta=(
+                "¿Confirmas que quieres que olvide tu número? "
+                "Tendrás que verificarte de nuevo la próxima vez que escribas."
+            ),
+            proxima_accion_propuesta="preguntar_dato_faltante",
+            propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+        )
+
+    def _interpretar_confirmacion_olvido(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
+        """Solo una aceptación CLARA (mismo vocabulario `_ACEPTA` ya
+        usado en el resto de este archivo) confirma el borrado —
+        cualquier otra respuesta (declina, ambigua, otro tema) cancela
+        la solicitud SIN borrar nada (requisito #3: "nunca borres sin
+        una confirmación clara") y restaura la etapa en la que estaba
+        el paciente antes de pedir el olvido, para no perder su lugar
+        en la conversación."""
+        etapa_anterior = datos.get("etapa_antes_de_olvido", "esperando_decision")
+        if not _contains_any(texto, _ACEPTA):
+            nuevos = {k: v for k, v in datos.items() if k != "etapa_antes_de_olvido"}
+            nuevos["etapa"] = etapa_anterior
+            return BrainOutput(
+                senales_detectadas=["olvido_de_identidad_cancelado"],
+                respuesta_propuesta="Entendido, no voy a borrar nada. ¿En qué más te ayudo?",
+                # "preguntar_dato_faltante" (no "preguntar_intencion"): la
+                # etapa restaurada puede venir de una fase_actual distinta
+                # de IDENTIFICACION_DE_INTENCION (ej. RECOPILACION_DE_DATOS,
+                # si el olvido se pidió a mitad de "esperando_seleccion")
+                # — "preguntar_intencion" solo es una transición VÁLIDA
+                # desde ciertas fases (state/machine.py:VALID_TRANSITIONS),
+                # y usarla aquí sin condición disparaba una escalación real
+                # por "error de transición" (bug encontrado con un test de
+                # esta misma extensión, recado 016). "preguntar_dato_faltante"
+                # es válida desde cualquier fase donde este wizard puede
+                # interrumpirse.
+                proxima_accion_propuesta="preguntar_dato_faltante",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+            )
+        nuevos = {k: v for k, v in datos.items() if k != "etapa_antes_de_olvido"}
+        nuevos["etapa"] = "olvido_confirmado"
+        return BrainOutput(
+            senales_detectadas=["olvido_de_identidad_confirmado"],
+            respuesta_propuesta="Listo, olvidé tu número — la próxima vez tendrás que verificarte de nuevo.",
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
         )

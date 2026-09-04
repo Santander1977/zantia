@@ -24,10 +24,24 @@ proceso, necesita vivir a un nivel distinto: `HealthGateway` (compartido
 por todo el proceso, ver `service/app.py`), respaldado por su propio
 archivo/tabla SQLite.
 
-Retención: sin política de vencimiento en esta fase — decisión
-explícita del usuario (2026-09-02, requisito #4 del pedido). Ver
-`.ai/DATA_MODEL.md` (política de retención) y `.ai/RISKS.md` (riesgo
-abierto mientras no se defina).
+Retención (recado 016, extensión de R-20 — decisiones de producto YA
+TOMADAS por el usuario, 2026-09-03, resolviendo lo que el recado 014
+había dejado explícitamente PENDIENTE):
+- **Vencimiento automático**: una identidad VERIFICADO deja de
+  considerarse vigente a los `RETENCION_IDENTIDAD_DIAS` (180) días de
+  `verificado_en` — ver `IdentidadCanal.vigente()`. Vencida, se trata
+  como si la fila no existiera (nunca se hidrata `_identidad_resuelta`
+  en `gateway.py`) — sin mensaje especial, el wizard de 3 pasos (012/014)
+  se dispara de nuevo exactamente igual que con un teléfono nuevo.
+- **Eliminación a pedido del paciente**: `eliminar()` — borrado REAL de
+  la fila (no un cambio de estado), disparado desde
+  `domains/health/gateway.py` cuando `HealthBrain` detecta y confirma
+  la intención ("olvida mi información" y equivalentes, ver
+  `domains/health/brain.py:_OLVIDAR`) — nunca automático, siempre tras
+  confirmación explícita del titular.
+
+Ver `.ai/DATA_MODEL.md` (política de retención completa) y
+`.ai/RISKS.md` R-20 (MITIGADO desde recado 016).
 """
 from __future__ import annotations
 
@@ -35,9 +49,16 @@ import os
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional, Protocol
+
+# Ventana de retención de una identidad VERIFICADA (recado 016, requisito
+# #1.3: "constante nombrada y fácil de encontrar/cambiar — no un número
+# mágico repetido en varios lugares"). Único lugar del proyecto que define
+# este valor — `gateway.py` y los tests lo importan de acá, nunca lo
+# repiten.
+RETENCION_IDENTIDAD_DIAS = 180
 
 
 def _utcnow() -> datetime:
@@ -59,6 +80,18 @@ class IdentidadCanal:
     estado: EstadoIdentidadCanal
     verificado_en: Optional[datetime]
 
+    def vigente(self, ahora: Optional[datetime] = None) -> bool:
+        """VERIFICADO y dentro de la ventana de retención
+        (`RETENCION_IDENTIDAD_DIAS`) — `False` para `PENDIENTE_VERIFICACION`
+        (nunca se hidrata, sin cambios de recado 014) o para una fila
+        `VERIFICADO` ya vencida (recado 016, requisito #1.2: se trata
+        como si no existiera, sin ningún mensaje especial de "tu
+        identidad venció" — más simple, sin UX dedicada para este caso)."""
+        if self.estado != EstadoIdentidadCanal.VERIFICADO or self.verificado_en is None:
+            return False
+        ahora = ahora or _utcnow()
+        return (ahora - self.verificado_en) <= timedelta(days=RETENCION_IDENTIDAD_DIAS)
+
 
 class IdentidadCanalStore(Protocol):
     def get(self, telefono: str) -> Optional[IdentidadCanal]: ...
@@ -70,9 +103,18 @@ class IdentidadCanalStore(Protocol):
         ...
 
     def marcar_verificado(self, telefono: str, documento: str) -> IdentidadCanal:
-        """Único punto que escribe estado=VERIFICADO — se llama
-        exclusivamente tras un código de verificación válido
-        (`domains/health/gateway.py:_procesar_codigo_de_identificacion`)."""
+        """Único punto que escribe estado=VERIFICADO — se llama tras un
+        código de verificación válido, tanto en el primer registro
+        (`domains/health/gateway.py:_procesar_codigo_de_identificacion`)
+        como al re-verificar después de un vencimiento (recado 016,
+        requisito #1.4: UPSERT — actualiza `verificado_en`, nunca crea
+        una fila duplicada, la `telefono` sigue siendo la llave primaria)."""
+        ...
+
+    def eliminar(self, telefono: str) -> None:
+        """Borrado REAL de la fila (recado 016, requisito #2.4) —
+        nunca un cambio de estado. Idempotente: no falla si la fila ya
+        no existe (mismo criterio que un DELETE SQL normal)."""
         ...
 
 
@@ -144,6 +186,11 @@ class SQLiteIdentidadCanalStore:
             )
             self._conn.commit()
         return IdentidadCanal(telefono, documento, EstadoIdentidadCanal.VERIFICADO, verificado_en)
+
+    def eliminar(self, telefono: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM identidad_canal WHERE telefono = ?", (telefono,))
+            self._conn.commit()
 
     @staticmethod
     def _fila_a_identidad(fila) -> IdentidadCanal:

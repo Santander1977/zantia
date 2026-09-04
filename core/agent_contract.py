@@ -17,10 +17,12 @@ múltiples agentes completos, solo el contrato y un agente demostrativo
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 from core.brain import Brain
+from core.config import DEFAULT_CONFIG
 from core.orchestrator import Orchestrator
 from guardrails.base import Guardrail
 from guardrails.engine import GuardrailEngine
@@ -30,6 +32,8 @@ from observability.events import EventLog
 from state.store import StateStore
 from tools.base import Tool
 from tools.registry import ToolRegistry
+
+logger = logging.getLogger("zantia.core")
 
 
 @dataclass
@@ -69,7 +73,23 @@ def build_orchestrator(definition: AgentDefinition) -> Orchestrator:
 
     from state.store import SQLiteStateStore
 
-    store: StateStore = SQLiteStateStore(":memory:")
+    db_path = DEFAULT_CONFIG.db_path
+    if db_path == ":memory:":
+        # Brecha de wiring resuelta (recado 021, previamente documentada
+        # en 014/D-6 y en .ai/RISKS.md): ZANTIA_DB_PATH ya se lee acá.
+        # Este warning es la parte "nunca en silencio" del fix — si
+        # alguien despliega un canal real sin configurar la variable,
+        # tiene que quedar un rastro imposible de ignorar en los logs,
+        # no un ":memory:" mudo que se descubre recién cuando el proceso
+        # se reinicia y una conversación real pierde todo su estado.
+        logger.warning(
+            "ZANTIA_DB_PATH no está configurada — el ConversationState de "
+            "esta conversación vive solo en memoria del proceso y se "
+            "pierde por completo si el proceso se reinicia a mitad de "
+            "camino. Configurar ZANTIA_DB_PATH (ver .env.example) antes "
+            "de desplegar cualquier canal en producción."
+        )
+    store: StateStore = SQLiteStateStore(db_path)
     memory = ConversationMemory(window_size=definition.memory_window)
     events = EventLog()
 

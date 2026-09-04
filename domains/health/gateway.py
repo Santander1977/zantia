@@ -28,11 +28,13 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from observability.events import EventType
+
 from .activity_source import ActivitySource
 from .agent import HealthAgentContext, build_health_agent_context, handle_patient_message
 from .appointment_service import AppointmentService, AppointmentStatus
 from .confirmation import ConfirmationTracker
-from .identity_store import EstadoIdentidadCanal, IdentidadCanalStore, SQLiteIdentidadCanalStore
+from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
 from .intent import classify_intent
 from .models import Activity, ActivityStatus, PatientRequest, RequestIntent, RequestStatus
 from .patient_request_source import MockPatientRequestSource, PatientRequestSource
@@ -246,6 +248,7 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
         # usa el camino de recordatorios — ver handle_reminder_response
         # en agent.py, sin tocar).
         respuesta = handle_patient_message(contexto_existente, message_id, text)
+        _procesar_olvido_si_corresponde(gateway, patient_reference, contexto_existente)
         _cerrar_si_definitivo(gateway, contexto_existente)
         return respuesta
 
@@ -267,16 +270,24 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
     # (`require_document_on_activity`, sin tocar).
     # Reconocimiento inmediato en un contacto SIGUIENTE (recado 014,
     # extensión de R-15): si este identificador de canal ya tiene una
-    # fila VERIFICADO en `identity_store` (persistente — sobrevive a un
-    # reinicio del proceso, a diferencia de `_identidad_resuelta`, que
-    # es solo caché en memoria de ESTE proceso), se puebla directamente
-    # ANTES del gate de abajo — nunca se vuelve a pedir documento ni
-    # código. Mismo duck-typing que el resto del gate: solo aplica
-    # cuando el AppointmentService activo distingue identificador de
-    # canal de documento real.
+    # fila VERIFICADO y VIGENTE en `identity_store` (persistente —
+    # sobrevive a un reinicio del proceso, a diferencia de
+    # `_identidad_resuelta`, que es solo caché en memoria de ESTE
+    # proceso), se puebla directamente ANTES del gate de abajo — nunca
+    # se vuelve a pedir documento ni código. Mismo duck-typing que el
+    # resto del gate: solo aplica cuando el AppointmentService activo
+    # distingue identificador de canal de documento real.
+    #
+    # `registro.vigente()` (recado 016, extensión de R-20): además de
+    # VERIFICADO, exige que `verificado_en` esté dentro de
+    # `RETENCION_IDENTIDAD_DIAS` (180) — una fila vencida se trata como
+    # si no existiera, SIN ningún mensaje especial ("tu identidad
+    # venció"): simplemente no se hidrata, y el gate de abajo dispara el
+    # wizard completo de nuevo, exactamente igual que un teléfono nuevo
+    # (requisito #1.2, deliberadamente sin UX dedicada para este caso).
     if patient_reference not in gateway._identidad_resuelta and _requiere_identidad_real(gateway):
         registro = gateway.identity_store.get(patient_reference)
-        if registro is not None and registro.estado == EstadoIdentidadCanal.VERIFICADO:
+        if registro is not None and registro.vigente():
             gateway._identidad_resuelta[patient_reference] = registro.documento
 
     if (
@@ -409,6 +420,57 @@ def _resolver_gestion_de_cita_existente(
     if _cerrar_si_definitivo(gateway, context):
         gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
     return respuesta
+
+
+def _procesar_olvido_si_corresponde(gateway: HealthGateway, patient_reference: str, context: HealthAgentContext) -> None:
+    """Ejecuta el borrado REAL de `identidad_canal` cuando `HealthBrain`
+    detectó Y confirmó la solicitud del paciente de olvidar su identidad
+    de canal (recado 016, extensión de R-20 — requisito de
+    `.claude/rules/proteccion-datos-personales.md`: "el usuario final
+    tiene siempre disponible... la forma de... pedir su eliminación").
+
+    Vive en `gateway.py`, no en `agent.py`, porque `identity_store` es un
+    servicio de `HealthGateway` (compartido por el proceso), no de
+    `HealthAgentContext` (por Activity) — mismo criterio que la
+    hidratación de identidad al inicio de `handle_inbound_message`.
+    `HealthBrain` (`brain.py:_iniciar_olvido`/`_interpretar_confirmacion_olvido`)
+    solo PROPONE el cambio de etapa a `"olvido_confirmado"` — nunca borra
+    nada directamente (mismo principio de autoridad de todo el proyecto:
+    el Brain propone, esta capa decide/ejecuta).
+
+    Deliberadamente independiente del mecanismo de beneficiario (013,
+    requisito #5): no toca `datos["beneficiario_documento"]` ni ninguna
+    de sus etapas, y no se dispara desde el camino Activity (outbound)
+    puro — solo desde una conversación que YA pasa por
+    `handle_patient_message` vía este archivo (ver el único call site,
+    en la rama `contexto_existente` de `handle_inbound_message`)."""
+    estado = context.orchestrator.store.get(context.activity.activity_id)
+    if estado is None or estado.datos_recopilados.get("etapa") != "olvido_confirmado":
+        return
+
+    documento_eliminado = gateway._identidad_resuelta.pop(patient_reference, None)
+    gateway.identity_store.eliminar(patient_reference)
+    gateway._pending_identity.pop(patient_reference, None)
+
+    context.orchestrator.events.record(
+        context.activity.activity_id, EventType.STATE_TRANSITION,
+        evento="IDENTIDAD_ELIMINADA_A_PEDIDO",
+        telefono=patient_reference,
+        documento=documento_eliminado,
+    )
+
+    # Consume la etapa "de un solo disparo" (mismo criterio que
+    # _ETAPAS_DE_UN_DISPARO en agent.py, aunque esta no está atada a un
+    # resultado de tool): sin esto, un mensaje futuro del paciente en la
+    # MISMA conversación volvería a intentar borrar (ya nada que borrar,
+    # pero seguiría registrando el evento de nuevo, sin sentido). Vuelve
+    # a "esperando_decision" — el paciente puede seguir la conversación
+    # con normalidad, solo que su identidad de canal ya no es confiable.
+    nuevos_datos = dict(estado.datos_recopilados)
+    nuevos_datos["etapa"] = "esperando_decision"
+    context.orchestrator.store.save(
+        estado.model_copy(update={"datos_recopilados": nuevos_datos}), expected_version=estado.version
+    )
 
 
 def _cerrar_si_definitivo(gateway: HealthGateway, context: HealthAgentContext) -> bool:

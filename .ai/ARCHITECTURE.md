@@ -25,7 +25,7 @@ Core del MVP, ya implementado y con tests pasando (ver `.ai/TESTING.md` y `/User
 | Orchestrator | Python | Único punto de escritura del estado; coordina Brain/Guardrails/Tools/Memory (LLM propone, orquestador decide) | `core/orchestrator.py` |
 | Brain | Python (FakeBrain determinista) + stub real (Anthropic, sin probar en vivo) | Interpreta el mensaje, propone cambios de estado — nunca los escribe | `core/brain.py` |
 | ConversationState | pydantic | Fuente única de verdad para decisiones de flujo | `state/models.py` |
-| StateStore | `sqlite3` (stdlib) | Persistencia real con concurrencia optimista por versión | `state/store.py` |
+| StateStore | `sqlite3` (stdlib) | Persistencia real con concurrencia optimista por versión — conectada por `core/agent_contract.py:build_orchestrator` vía `ZANTIA_DB_PATH` (recado 021; antes hardcodeado a `":memory:"`, brecha de wiring documentada en R-11/R-22 y descrita también en `docs/decisions/d-6-identidad-canal-persistente.md`). Sin la variable, cae a `":memory:"` con un `logger.warning` explícito, nunca en silencio | `state/store.py`, `core/agent_contract.py` |
 | Máquina de estados | Python | Transiciones válidas/inválidas, interrupciones globales | `state/machine.py` |
 | Memory | Python (memoria de proceso) | Conversación reciente / perfil de usuario (parcial) / resumen | `memory/` |
 | Knowledge | Python | Separación estático/dinámico; RAG documentado como stub, no implementado | `knowledge/` |
