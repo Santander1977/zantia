@@ -14,6 +14,7 @@ def test_activity_result_reported_after_booking(context, services):
     accept_activity(context)
     contact_patient(context)
     handle_patient_message(context, "m1", "sí, me interesa")
+    handle_patient_message(context, "m1b", "1")  # elige fecha (recado 035)
     handle_patient_message(context, "m2", "la primera")
 
     finalize_and_report(context)

@@ -44,20 +44,20 @@ def test_respuesta_si_sin_tilde_avanza_la_conversacion(context):
         "'Si' sin tilde no avanzó la conversación — quedó repitiendo la "
         "pregunta de sí/no (bug real de producción, recado 026)"
     )
-    assert "opciones disponibles" in r1.lower()
+    assert "fechas disponibles" in r1.lower()
 
 
 def test_respuesta_si_minuscula_sin_tilde_tambien_avanza(context):
     _iniciar(context)
     r1 = handle_patient_message(context, "m1", "si")
-    assert "opciones disponibles" in r1.lower()
+    assert "fechas disponibles" in r1.lower()
 
 
 def test_respuesta_si_con_signos_de_puntuacion_tambien_avanza(context):
     """'¡Si!'/'Si.' — puntuación de borde no debe impedir el match."""
     _iniciar(context)
     r1 = handle_patient_message(context, "m1", "¡Si!")
-    assert "opciones disponibles" in r1.lower()
+    assert "fechas disponibles" in r1.lower()
 
 
 def test_respuesta_no_bare_declina_sin_quedar_atascada(context):

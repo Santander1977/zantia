@@ -175,16 +175,18 @@ def test_declina_restaura_la_etapa_anterior_y_la_conversacion_continua():
     el lugar del paciente en la conversación — mismo criterio que el
     resto del dominio (nunca dejar una conversación en un limbo)."""
     gateway, store, llamadas_reserva = _gateway_con_identidad_ya_verificada(citas_por_documento={_DOCUMENTO_VALIDO: []})
-    _abrir_conversacion(gateway)  # etapa: esperando_decision
+    _abrir_conversacion(gateway)  # etapa: esperando_fecha (recado 035, PASO 2)
 
     handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m2", "olvida mi información")
     handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m3", "no")
 
     # La conversación sigue exactamente donde estaba tras `_abrir_conversacion`
-    # (que ya avanzó a "esperando_seleccion", ofreciendo opciones) — elegir
-    # la opción 1 ahora completa la reserva con normalidad, prueba de que
-    # el interrupt de olvido no dejó nada corrompido.
-    r3 = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m4", "1")
+    # (que ya avanzó a "esperando_fecha", ofreciendo fechas reales) —
+    # elegir fecha y luego horario ahora completa la reserva con
+    # normalidad, prueba de que el interrupt de olvido no dejó nada
+    # corrompido.
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m4", "1")  # elige fecha
+    r3 = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m5", "1")  # elige horario
     assert "confirmado" in r3.lower()
     assert len(llamadas_reserva) == 1
     assert llamadas_reserva[0]["documento_paciente"] == _DOCUMENTO_VALIDO
@@ -241,7 +243,9 @@ def test_no_interfiere_con_flujo_de_beneficiario():
     assert estado_restaurado.datos_recopilados.get("beneficiario_documento_candidato") == _BENEFICIARIO_VALIDO
 
     r4 = hpm(context, "m5", "sí")
-    assert "opciones disponibles" in r4.lower()
+    assert "fechas disponibles" in r4.lower()
+    r4b = hpm(context, "m5b", "1")  # elige fecha (recado 035)
+    assert "horarios disponibles" in r4b.lower()
     r5 = hpm(context, "m6", "1")
     assert "confirmado" in r5.lower()
     assert llamadas_reserva[0]["documento_paciente"] == _BENEFICIARIO_VALIDO
@@ -275,7 +279,9 @@ def test_camino_activity_outbound_sigue_funcionando_igual():
     start_activity_and_register(gateway, activity)
 
     r1 = handle_inbound_message(gateway, _DOCUMENTO_VALIDO, "demo", "m1", "sí")
-    assert "opciones disponibles" in r1.lower()
+    assert "fechas disponibles" in r1.lower()
+    r1b = handle_inbound_message(gateway, _DOCUMENTO_VALIDO, "demo", "m1b", "1")  # elige fecha (recado 035)
+    assert "horarios disponibles" in r1b.lower()
     r2 = handle_inbound_message(gateway, _DOCUMENTO_VALIDO, "demo", "m2", "1")
     assert "confirmado" in r2.lower()
     assert len(llamadas_reserva) == 1

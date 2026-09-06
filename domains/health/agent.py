@@ -186,9 +186,18 @@ def handle_patient_message(context: HealthAgentContext, message_id: str, text: s
                 context.activity.activity_id, cita.appointment_id, fecha_hora
             )
             verbo = "confirmado" if just_booked else "reprogramado"
+            # "Te enviamos un correo de confirmación..." (recado 035,
+            # pedido explícito, decisión de producto confirmada por el
+            # usuario 2026-09-06): hrmm-backend ya envía ese correo de
+            # forma NATIVA al ejecutar el POST real — ZANTIA nunca lo
+            # dispara ni lo duplica, solo lo complementa
+            # conversacionalmente. Misma frase en `gateway.py` (sub-flujo
+            # de cancelar/reprogramar verificado) — mantener ambas en
+            # sync si se cambia la redacción.
             respuesta = (
                 respuesta
                 + f" ¡Listo! Quedó {verbo}: {cita.service} el {cita.date} a las {cita.time} en {cita.location}."
+                " Te enviamos un correo de confirmación con todos los detalles."
             )
             evento = "APPOINTMENT_CONFIRMED" if just_booked else "APPOINTMENT_RESCHEDULED"
             context.orchestrator.events.record(context.activity.activity_id, EventType.STATE_TRANSITION, evento=evento)
@@ -309,7 +318,12 @@ def _sincronizar_activity(context: HealthAgentContext, resultado: OrchestratorRe
     if datos.get("decision") == "DECLINED":
         return _touch(activity, management_status=ManagementStatus.DECLINED)
 
-    if etapa == "esperando_seleccion":
+    # Recado 035: el antiguo "esperando_seleccion" (una sola lista
+    # combinada fecha+hora) se separó en dos etapas — "esperando_fecha"
+    # (PASO 2) y "esperando_horario" (PASO 3) — ambas son, para efectos
+    # de `management_status`, la misma señal de "el paciente ya aceptó
+    # y está eligiendo": `ENGAGED`, sin cambios de significado.
+    if etapa in ("esperando_fecha", "esperando_horario"):
         return _touch(activity, management_status=ManagementStatus.ENGAGED)
 
     if etapa == "esperando_seleccion_reprogramacion":

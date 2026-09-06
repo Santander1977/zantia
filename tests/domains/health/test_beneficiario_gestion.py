@@ -105,6 +105,7 @@ def test_titular_gestiona_para_si_mismo_sin_cambios(hrmm_context):
     context, llamadas_reserva = hrmm_context()
 
     handle_patient_message(context, "m1", "sí")
+    handle_patient_message(context, "m1b", "1")  # elige fecha (recado 035: flujo en 3 etapas)
     respuesta = handle_patient_message(context, "m2", "1")
 
     assert len(llamadas_reserva) == 1
@@ -129,7 +130,10 @@ def test_titular_declara_beneficiario_valido_reserva_usa_su_documento(hrmm_conte
     assert "correcto" in r2.lower()
 
     r3 = handle_patient_message(context, "m3", "sí")
-    assert "opciones disponibles" in r3.lower()
+    assert "fechas disponibles" in r3.lower()
+
+    r3b = handle_patient_message(context, "m3b", "1")  # elige fecha (recado 035)
+    assert "horarios disponibles" in r3b.lower()
 
     r4 = handle_patient_message(context, "m4", "1")
     assert "confirmado" in r4.lower()
@@ -157,6 +161,7 @@ def test_eventlog_registra_gestor_y_beneficiario_por_separado(hrmm_context):
     handle_patient_message(context, "m1", "es para mi mamá")
     handle_patient_message(context, "m2", _BENEFICIARIO_VALIDO)
     handle_patient_message(context, "m3", "sí")
+    handle_patient_message(context, "m3b", "1")  # elige fecha (recado 035)
     handle_patient_message(context, "m4", "1")
 
     eventos = [

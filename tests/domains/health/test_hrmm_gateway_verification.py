@@ -73,6 +73,7 @@ def test_mock_appointment_service_no_entra_al_subflujo_de_codigo(context):
     accept_activity(context)
     contact_patient(context)
     handle_patient_message(context, "m1", "sí, me interesa")
+    handle_patient_message(context, "m1b", "1")  # elige fecha (recado 035)
     respuesta = handle_patient_message(context, "m2", "la primera")
     assert "confirmado" in respuesta.lower()
 

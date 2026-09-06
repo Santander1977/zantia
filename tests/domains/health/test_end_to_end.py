@@ -42,10 +42,14 @@ def test_happy_path_end_to_end(services, activity_factory):
     contact_patient(context)
     assert context.activity.management_status == ManagementStatus.CONTACTED
 
-    # -> PATIENT ACCEPTS -> QUERY AVAILABILITY
+    # -> PATIENT ACCEPTS -> QUERY AVAILABILITY (fechas, recado 035, PASO 2)
     r1 = handle_patient_message(context, "m1", "hola, sí me interesa")
-    assert "opciones disponibles" in r1.lower()
+    assert "fechas disponibles" in r1.lower()
     assert context.activity.management_status == ManagementStatus.ENGAGED
+
+    # -> elige fecha -> horarios reales (recado 035, PASO 3)
+    r1b = handle_patient_message(context, "m1b", "1")
+    assert "horarios disponibles" in r1b.lower()
 
     # -> PATIENT SELECTS -> BOOK -> CONFIRM
     r2 = handle_patient_message(context, "m2", "la primera opción")
@@ -95,6 +99,7 @@ def test_rescheduling_path_end_to_end(services, activity_factory):
     accept_activity(context)
     contact_patient(context)
     handle_patient_message(context, "m1", "sí, me interesa")
+    handle_patient_message(context, "m1b", "1")  # elige fecha (recado 035)
     handle_patient_message(context, "m2", "la primera opción")
     appointment_id_original = context.activity.appointment_id
 

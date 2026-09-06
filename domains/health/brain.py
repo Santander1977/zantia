@@ -25,6 +25,7 @@ proponen solo como `tool_requerida`, nunca se ejecutan desde el Brain
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from core.brain import BrainOutput
@@ -159,6 +160,73 @@ def _es_saludo(texto: str) -> bool:
     return _contains_any_sin_tildes(texto, _SALUDOS)
 
 
+# Variantes de mensajes de aclaración/fallback (recado 034, pedido
+# explícito del usuario): un paciente que se equivoca dos veces
+# seguidas no debe recibir literalmente la misma frase — igual que un
+# humano no se repetiría palabra por palabra. La rotación es
+# DETERMINISTA (nunca al azar, consistente con el resto del archivo:
+# palabras clave, sin NLU real) — un contador en `datos_recopilados`
+# avanza en cada fallback del MISMO tipo dentro de la MISMA
+# conversación; `_elegir_variante` solo hace `contador % len(variantes)`.
+def _elegir_variante(variantes: tuple, datos: Dict[str, Any], clave_contador: str) -> tuple:
+    """Devuelve `(variante_elegida, datos_actualizados)` — nunca muta
+    `datos` in-place (mismo criterio del resto del archivo: siempre
+    copias nuevas vía `{**datos, ...}`)."""
+    contador = datos.get(clave_contador, 0)
+    variante = variantes[contador % len(variantes)]
+    return variante, {**datos, clave_contador: contador + 1}
+
+
+# Todas contienen "sí"/"no"/"agendar" (sustancia idéntica — solo cambia
+# la redacción) para no romper ninguna garantía de contenido existente.
+# La segunda variante reconoce explícitamente que el paciente escribió
+# algo (pedido #2 del usuario: "reconocer qué fue lo que el paciente
+# dijo antes de repreguntar") sin citar el texto literal (evita
+# problemas con mensajes muy largos o con caracteres inesperados).
+_VARIANTES_ACLARACION_SI_NO = (
+    "No logré entender si es un sí o un no — ¿me confirmas si quieres que te ayude a agendar tu atención?",
+    "Vi tu mensaje, pero no me quedó claro si es un sí o un no — ¿podrías confirmármelo con esa palabra, así te ayudo a agendar?",
+    "Perdona, no logré identificar si tu respuesta es un sí o un no — ¿me lo confirmas así puedo seguir ayudándote a agendar?",
+)
+_VARIANTES_SERVICIO_NO_IDENTIFICADO = (
+    "No logré identificar cuál de estos prefieres: {opciones}. ¿Me confirmas el nombre tal como aparece en la lista?",
+    "Perdona, no reconocí cuál de estos servicios quieres: {opciones}. ¿Me lo repites tal cual aparece ahí?",
+)
+_VARIANTES_SELECCION_NO_IDENTIFICADA = (
+    "No logré identificar cuál prefieres — ¿me confirmas si es la 1, la 2 o la 3?",
+    "No estoy seguro de haber entendido cuál elegiste — ¿me dices si es la 1, la 2 o la 3?",
+)
+_VARIANTES_FECHA_NO_IDENTIFICADA = (
+    "No logré identificar cuál fecha prefieres — ¿me confirmas si es la 1, la 2 o la 3?",
+    "Perdona, no reconocí cuál de esas fechas elegiste — ¿me dices si es la 1, la 2 o la 3?",
+)
+
+# Nombres en español para formatear una fecha real ("2026-09-07") de
+# forma legible ("Lunes 7 de septiembre") — recado 035, Paso 2 del
+# asistente de reserva en etapas. Deliberadamente SIN depender de
+# `locale.setlocale` (no determinista entre entornos/contenedores,
+# depende de qué locales tenga instalados el sistema operativo) — una
+# tabla fija es más simple y 100% portable.
+_DIAS_SEMANA = ("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")
+_MESES = (
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+)
+
+
+def _formatear_fecha_humana(fecha_iso: str) -> str:
+    """`"2026-09-07"` -> `"Lunes 7 de septiembre"`. Si `fecha_iso` no
+    viene en el formato esperado (nunca debería pasar con datos reales
+    de `AvailabilitySlot.date`), se devuelve tal cual — nunca se
+    inventa una fecha ni se rompe la conversación por un formato
+    inesperado."""
+    try:
+        fecha = datetime.strptime(fecha_iso, "%Y-%m-%d")
+    except ValueError:
+        return fecha_iso
+    return f"{_DIAS_SEMANA[fecha.weekday()]} {fecha.day} de {_MESES[fecha.month - 1]}"
+
+
 class HealthBrain:
     def __init__(self, activity_provider: Callable[[], Any], appointment_service: AppointmentService) -> None:
         self._activity_provider = activity_provider
@@ -234,8 +302,10 @@ class HealthBrain:
             return self._interpretar_documento_beneficiario(message.strip(), datos)
         if etapa == "esperando_confirmacion_beneficiario":
             return self._interpretar_confirmacion_beneficiario(texto, datos)
-        if etapa == "esperando_seleccion":
-            return self._interpretar_seleccion(texto, datos)
+        if etapa == "esperando_fecha":
+            return self._interpretar_fecha(texto, datos)
+        if etapa == "esperando_horario":
+            return self._interpretar_horario(texto, datos)
         if etapa == "esperando_seleccion_reprogramacion":
             return self._interpretar_seleccion_reprogramacion(texto, datos)
 
@@ -366,14 +436,21 @@ class HealthBrain:
         # del todo sin NLU real (ver `.ai/RISKS.md` R-13).
         if _es_negativo(texto):
             nuevos = {**datos, "etapa": "finalizada", "decision": "DECLINED"}
+            # Nombre real (recado 034) — momento natural de despedida.
+            nombre = (self._activity.patient_contact or {}).get("nombre")
+            despedida = (
+                f"Entiendo perfectamente, {nombre} — gracias por tu tiempo."
+                if nombre
+                else "Entiendo perfectamente, gracias por tu tiempo."
+            )
             return BrainOutput(
                 senales_detectadas=["paciente_declina"],
-                respuesta_propuesta="Entiendo perfectamente, gracias por tu tiempo. Si más adelante cambias de opinión, aquí voy a estar.",
+                respuesta_propuesta=f"{despedida} Si más adelante cambias de opinión, aquí voy a estar.",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
 
         if _es_afirmativo(texto):
-            return self._ofrecer_disponibilidad(datos)
+            return self._ofrecer_fechas(datos)
 
         # Saludo simple (recado 030) — no dispara ninguna transición de
         # estado nueva, solo reconoce que el paciente escribió algo
@@ -386,15 +463,14 @@ class HealthBrain:
         # sí/no (recado 030, pedido explícito: no repetir la pregunta
         # original sin ningún reconocimiento de que el paciente intentó
         # decir algo). Sigue siendo la MISMA pregunta cerrada de sí/no
-        # (ninguna garantía ni guardrail cambia), solo con mejor
-        # redacción y reconociendo el intento.
+        # (ninguna garantía ni guardrail cambia). Ahora además ROTA
+        # entre variantes (recado 034) — dos fallbacks seguidos en la
+        # misma conversación no repiten literalmente la misma frase.
+        variante, nuevos = _elegir_variante(_VARIANTES_ACLARACION_SI_NO, datos, "intentos_aclaracion_si_no")
         return BrainOutput(
-            respuesta_propuesta=(
-                f"{saludo}No logré entender si es un sí o un no — "
-                "¿me confirmas si quieres que te ayude a agendar tu atención?"
-            ),
+            respuesta_propuesta=f"{saludo}{variante}",
             proxima_accion_propuesta="preguntar_intencion",
-            propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+            propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
         )
 
     # ------------------------------------------------------------------
@@ -413,44 +489,43 @@ class HealthBrain:
         normalizado = _sin_tildes(texto)
         elegido = next((s for s in servicios if _sin_tildes(s.lower()) in normalizado), None)
         if elegido is None:
+            nuevos = datos
             if servicios:
                 texto_servicios = ", ".join(servicios)
-                respuesta = (
-                    f"No logré identificar cuál de estos prefieres: {texto_servicios}. "
-                    "¿Me confirmas el nombre tal como aparece en la lista?"
+                variante, nuevos = _elegir_variante(
+                    _VARIANTES_SERVICIO_NO_IDENTIFICADO, datos, "intentos_aclaracion_servicio"
                 )
+                respuesta = variante.format(opciones=texto_servicios)
             else:
                 respuesta = "Por ahora no tengo el catálogo de servicios a la mano — ¿me cuentas qué tipo de atención necesitas?"
             return BrainOutput(
                 respuesta_propuesta=respuesta,
                 proxima_accion_propuesta="preguntar_dato_faltante",
-                propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
         nuevos = {**datos, "servicio_elegido": elegido}
-        return self._ofrecer_disponibilidad(nuevos)
+        return self._ofrecer_fechas(nuevos)
 
     # ------------------------------------------------------------------
-    def _ofrecer_disponibilidad(self, datos: Dict[str, Any]) -> BrainOutput:
-        """Extraído de la rama `_ACEPTA` de `_interpretar_decision`
-        (recado 013) para que también lo use el flujo de confirmación de
-        beneficiario, sin duplicar la lógica de ofrecer disponibilidad.
-
-        `datos.get("servicio_elegido")` tiene prioridad (recado 030):
-        cuando el paciente respondió explícitamente cuál servicio quiere
-        (ver `_interpretar_servicio`), ESE es el servicio real a
-        consultar — nunca `self._activity.service` (que para una
-        Activity sintética de `gateway.py:_resolver_programar_cita`
-        puede venir vacío a propósito, ver `_determinar_servicio_inicial`)
-        ni el fallback histórico "medicina general" (causa raíz de los
-        recados 027 y 030: asumía un servicio que el paciente nunca
-        confirmó)."""
+    # Asistente de reserva EN ETAPAS (recado 035, pedido explícito del
+    # usuario): antes, una sola lista combinaba fecha+hora+consultorio
+    # en un bloque ("1) 2026-09-07 07:00 en Consultorio 2"). Ahora son 3
+    # pasos secuenciales — servicio (ya resuelto al llegar acá) -> fecha
+    # -> horario — cada uno una lista de una sola cosa por línea, y cada
+    # uno consulta disponibilidad REAL (nunca inventada). Reemplaza a
+    # `_ofrecer_disponibilidad`/`_interpretar_seleccion` (recados 013 y
+    # 027) — mismos llamadores (rama `_ACEPTA` del camino outbound,
+    # confirmación de beneficiario, `_interpretar_servicio`).
+    # ------------------------------------------------------------------
+    def _ofrecer_fechas(self, datos: Dict[str, Any]) -> BrainOutput:
+        """PASO 2 — fechas reales con disponibilidad para el servicio ya
+        resuelto (`datos.get("servicio_elegido")`, o
+        `self._activity.service` para el camino outbound donde ya viene
+        fijo — mismo criterio y misma razón que `_ofrecer_disponibilidad`
+        tenía antes: nunca "medicina general" a ciegas, recados 027/030).
+        Nunca horarios todavía — ese es el PASO 3 (`_ofrecer_horarios`)."""
         servicio = datos.get("servicio_elegido") or self._activity.service or "medicina general"
-        opciones = self._appointment_service.get_availability(servicio)[:3]
-        nuevos = {
-            **datos,
-            "etapa": "esperando_seleccion",
-            "opciones_ofrecidas": [o.slot_id for o in opciones],
-        }
+        opciones = self._appointment_service.get_availability(servicio)
         if not opciones:
             # NUNCA "te contactamos" (recado 026, hallazgo real de
             # producción): esa frase está en `guardrails/rules.py:
@@ -468,17 +543,120 @@ class HealthBrain:
                 ),
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": {**datos, "etapa": "finalizada"}},
             )
-        texto_opciones = "; ".join(
-            f"{i+1}) {o.date} {o.time} en {o.location}" for i, o in enumerate(opciones)
-        )
+        # Fechas REALES únicas, ordenadas — nunca más de 3 (mismo tope
+        # que el resto del archivo, y `_elegir_opcion` solo reconoce
+        # ordinales 1ª/2ª/3ª: mostrar más de las que se pueden elegir
+        # sería un bug nuevo, no una mejora).
+        fechas = sorted({o.date for o in opciones})[:3]
+        nuevos = {
+            **datos,
+            "etapa": "esperando_fecha",
+            "servicio_elegido": servicio,
+            "fechas_ofrecidas": fechas,
+        }
+        texto_fechas = "; ".join(f"{i+1}) {_formatear_fecha_humana(f)}" for i, f in enumerate(fechas))
         return BrainOutput(
-            respuesta_propuesta=f"¡Perfecto! Estas son las opciones disponibles: {texto_opciones}. ¿Cuál te queda mejor?",
+            respuesta_propuesta=f"Estas son las fechas disponibles: {texto_fechas}. ¿Cuál te queda mejor?",
             # "preguntar_dato_faltante" (no "ejecutar_tool"): todavía
-            # falta la SELECCIÓN del paciente antes de poder reservar
-            # — la tool que se ejecuta aquí es de lectura
+            # falta que el paciente elija fecha y horario antes de
+            # reservar — la tool que se ejecuta aquí es de lectura
             # (get_availability), no la acción final.
             proxima_accion_propuesta="preguntar_dato_faltante",
             tool_requerida={"name": "get_availability", "params": {"service": servicio}},
+            propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+        )
+
+    def _interpretar_fecha(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
+        """PASO 2 (respuesta) — el paciente elige una de las fechas ya
+        ofrecidas (ordinal, mismo mecanismo que el resto del archivo,
+        `_elegir_opcion`). Nunca inventa ni asume la primera si no fue
+        claro."""
+        fechas = datos.get("fechas_ofrecidas", [])
+        elegida = self._elegir_opcion(texto, fechas)
+        if elegida is None:
+            variante, nuevos = _elegir_variante(
+                _VARIANTES_FECHA_NO_IDENTIFICADA, datos, "intentos_aclaracion_fecha"
+            )
+            return BrainOutput(
+                respuesta_propuesta=variante,
+                proxima_accion_propuesta="preguntar_dato_faltante",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+            )
+        nuevos = {**datos, "fecha_elegida": elegida}
+        return self._ofrecer_horarios(nuevos)
+
+    def _ofrecer_horarios(self, datos: Dict[str, Any]) -> BrainOutput:
+        """PASO 3 — horarios reales para el servicio Y la fecha ya
+        elegidos, uno por línea (nunca combinado con la fecha, que ya
+        se confirmó en el paso anterior)."""
+        servicio = datos["servicio_elegido"]
+        fecha = datos["fecha_elegida"]
+        opciones = [o for o in self._appointment_service.get_availability(servicio) if o.date == fecha][:3]
+        if not opciones:
+            # Caso raro (condición de carrera real: alguien más reservó
+            # el último cupo de esa fecha entre el PASO 2 y esta
+            # respuesta) — nunca se inventa un horario; se vuelve al
+            # PASO 2 con disponibilidad fresca en vez de dejar al
+            # paciente sin ninguna salida.
+            return self._ofrecer_fechas({**datos, "etapa": "esperando_fecha"})
+        nuevos = {
+            **datos,
+            "etapa": "esperando_horario",
+            "opciones_horario": [o.slot_id for o in opciones],
+        }
+        texto_horarios = "; ".join(f"{i+1}) {o.time} en {o.location}" for i, o in enumerate(opciones))
+        fecha_legible = _formatear_fecha_humana(fecha)
+        return BrainOutput(
+            respuesta_propuesta=(
+                f"Para el {fecha_legible}, estos son los horarios disponibles: {texto_horarios}. "
+                "¿Cuál prefieres?"
+            ),
+            proxima_accion_propuesta="preguntar_dato_faltante",
+            propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+        )
+
+    def _interpretar_horario(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
+        """PASO 3 (respuesta) — el paciente elige un horario real de los
+        ya ofrecidos para la fecha confirmada; resuelve directo al
+        `slot_id` real y dispara la reserva. Reemplaza a
+        `_interpretar_seleccion` (recados 013/027) — misma lógica de
+        reserva (beneficiario, nombre, idempotencia), solo que el
+        `slot_id` ya viene acotado a servicio+fecha, no a una lista
+        combinada."""
+        opciones = datos.get("opciones_horario", [])
+        elegida = self._elegir_opcion(texto, opciones)
+        if elegida is None:
+            variante, nuevos = _elegir_variante(
+                _VARIANTES_SELECCION_NO_IDENTIFICADA, datos, "intentos_aclaracion_seleccion"
+            )
+            return BrainOutput(
+                respuesta_propuesta=variante,
+                proxima_accion_propuesta="preguntar_dato_faltante",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+            )
+        nuevos = {**datos, "etapa": "reservando", "slot_seleccionado": elegida}
+        # Recado 013: si el titular declaró y confirmó un beneficiario,
+        # la reserva se hace a nombre del BENEFICIARIO, nunca del
+        # titular del canal (requisito #3) — `self._activity.patient_reference`
+        # solo se usa cuando no hay beneficiario (comportamiento por
+        # defecto, requisito #5, sin cambios frente a antes de esta extensión).
+        patient_reference_reserva = datos.get("beneficiario_documento") or self._activity.patient_reference
+        # Nombre real (recado 034) — "momento natural" para usarlo, sin
+        # repetirlo también en el mensaje de confirmación que
+        # `agent.py` concatena a continuación (evita sobreusarlo).
+        nombre = (self._activity.patient_contact or {}).get("nombre")
+        apertura = f"¡Perfecto, {nombre}!" if nombre else "¡Perfecto!"
+        return BrainOutput(
+            respuesta_propuesta=f"{apertura} Dame un segundo, voy a dejarlo reservado.",
+            proxima_accion_propuesta="ejecutar_tool",
+            tool_requerida={
+                "name": "book_appointment",
+                "params": {
+                    "slot_id": elegida,
+                    "patient_reference": patient_reference_reserva,
+                    "idempotency_key": f"{self._activity.activity_id}:booking",
+                },
+            },
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
         )
 
@@ -535,45 +713,20 @@ class HealthBrain:
             "beneficiario_documento": datos["beneficiario_documento_candidato"],
             "beneficiario_nombre": datos["beneficiario_nombre_candidato"],
         }
-        return self._ofrecer_disponibilidad(nuevos)
+        return self._ofrecer_fechas(nuevos)
 
     # ------------------------------------------------------------------
+    # `_elegir_opcion` sigue aquí sin cambios — la reutiliza también
+    # `_interpretar_seleccion_reprogramacion` (reprogramar una cita YA
+    # existente sigue con la lista combinada de antes; el asistente en
+    # etapas del recado 035 es específicamente para RESERVAR una cita
+    # nueva, alcance explícito del pedido — reprogramar no se tocó).
     def _elegir_opcion(self, texto: str, opciones: List[str]) -> Optional[str]:
         mapa_ordinal = {"1": 0, "primera": 0, "2": 1, "segunda": 1, "3": 2, "tercera": 2}
         for clave, indice in mapa_ordinal.items():
             if clave in texto and indice < len(opciones):
                 return opciones[indice]
         return None
-
-    def _interpretar_seleccion(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
-        opciones = datos.get("opciones_ofrecidas", [])
-        elegida = self._elegir_opcion(texto, opciones)
-        if elegida is None:
-            return BrainOutput(
-                respuesta_propuesta="No logré identificar cuál prefieres — ¿me confirmas si es la 1, la 2 o la 3?",
-                proxima_accion_propuesta="preguntar_dato_faltante",
-                propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
-            )
-        nuevos = {**datos, "etapa": "reservando", "slot_seleccionado": elegida}
-        # Recado 013: si el titular declaró y confirmó un beneficiario,
-        # la reserva se hace a nombre del BENEFICIARIO, nunca del
-        # titular del canal (requisito #3) — `self._activity.patient_reference`
-        # solo se usa cuando no hay beneficiario (comportamiento por
-        # defecto, requisito #5, sin cambios frente a antes de esta extensión).
-        patient_reference_reserva = datos.get("beneficiario_documento") or self._activity.patient_reference
-        return BrainOutput(
-            respuesta_propuesta="¡Perfecto! Voy a reservarlo — dame un momento.",
-            proxima_accion_propuesta="ejecutar_tool",
-            tool_requerida={
-                "name": "book_appointment",
-                "params": {
-                    "slot_id": elegida,
-                    "patient_reference": patient_reference_reserva,
-                    "idempotency_key": f"{self._activity.activity_id}:booking",
-                },
-            },
-            propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
-        )
 
     # ------------------------------------------------------------------
     def _iniciar_reprogramacion(self, datos: Dict[str, Any]) -> BrainOutput:

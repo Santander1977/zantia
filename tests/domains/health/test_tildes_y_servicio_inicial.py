@@ -93,12 +93,12 @@ def test_respuesta_afirmativa_sin_tilde_como_primera_palabra_avanza(gateway, ser
     respuesta = handle_inbound_message(
         gateway, "TG-030-2", "telegram", "m1", "Si claro ayudame puedes orientarme mejor",
     )
-    assert "opciones disponibles" in respuesta.lower()
+    assert "fechas disponibles" in respuesta.lower()
 
 
 def test_respuesta_afirmativa_variante_real_tambien_avanza(gateway):
     respuesta = handle_inbound_message(gateway, "TG-030-3", "telegram", "m1", "Si claro necesito tu ayuda")
-    assert "opciones disponibles" in respuesta.lower()
+    assert "fechas disponibles" in respuesta.lower()
 
 
 def test_no_puedo_asistir_ahora_no_se_confunde_con_declinar(context):
@@ -184,7 +184,7 @@ def test_nombrar_el_servicio_real_despues_de_la_pregunta_avanza_a_disponibilidad
     pref = "TG-030-SERV-2"
     handle_inbound_message(gateway, pref, "telegram", "m1", "necesito una cita")
     r2 = handle_inbound_message(gateway, pref, "telegram", "m2", "odontologia")
-    assert "opciones disponibles" in r2.lower()
+    assert "fechas disponibles" in r2.lower()
 
 
 def test_nombrar_servicio_sin_tilde_tambien_matchea_el_nombre_real_con_tilde():
@@ -221,4 +221,4 @@ def test_con_un_solo_servicio_real_no_pregunta_nada_comportamiento_sin_cambios(g
     """Control: MockAppointmentService por defecto (un solo servicio)
     sigue yendo directo a disponibilidad, exactamente como antes."""
     respuesta = handle_inbound_message(gateway, "TG-030-UNO", "telegram", "m1", "necesito una cita")
-    assert "opciones disponibles" in respuesta.lower()
+    assert "fechas disponibles" in respuesta.lower()

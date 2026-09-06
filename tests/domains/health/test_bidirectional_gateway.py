@@ -34,7 +34,7 @@ def test_correlacion_enruta_a_activity_outbound_existente(gateway, activity_fact
 
     respuesta = handle_inbound_message(gateway, "PAC-CORR-1", "demo", "m1", "sí, me interesa")
 
-    assert "opciones disponibles" in respuesta.lower()
+    assert "fechas disponibles" in respuesta.lower()
     # NUNCA se crea una PatientRequest para esto (sección de correlación):
     assert gateway.patient_request_source.list_for_patient("PAC-CORR-1") == []
 
@@ -57,7 +57,10 @@ def test_patient_request_genuina_se_crea_y_clasifica(gateway):
 # ---------------------------------------------------------------------
 def test_programar_cita_completa_iniciada_por_el_paciente(gateway, services):
     r1 = handle_inbound_message(gateway, "PAC-CORR-3", "demo", "m1", "quiero agendar una cita")
-    assert "opciones disponibles" in r1.lower()
+    assert "fechas disponibles" in r1.lower()
+
+    r1b = handle_inbound_message(gateway, "PAC-CORR-3", "demo", "m1b", "1")  # elige fecha (recado 035)
+    assert "horarios disponibles" in r1b.lower()
 
     r2 = handle_inbound_message(gateway, "PAC-CORR-3", "demo", "m2", "la primera opción")
     assert "confirmado" in r2.lower()
@@ -79,6 +82,7 @@ def test_programar_cita_completa_iniciada_por_el_paciente(gateway, services):
 # ---------------------------------------------------------------------
 def test_consultar_cita_usa_appointment_service_como_fuente_real(gateway, services):
     handle_inbound_message(gateway, "PAC-CORR-4", "demo", "m1", "quiero agendar una cita")
+    handle_inbound_message(gateway, "PAC-CORR-4", "demo", "m1b", "1")  # elige fecha (recado 035)
     handle_inbound_message(gateway, "PAC-CORR-4", "demo", "m2", "la primera")
 
     cita_real = services["appointment_service"].get_patient_appointments("PAC-CORR-4")[0]
@@ -109,6 +113,7 @@ def test_reprogramacion_inbound_fresca_dispara_iniciar_reprogramacion(gateway):
     original = HealthBrain._iniciar_reprogramacion
     with patch.object(HealthBrain, "_iniciar_reprogramacion", autospec=True, side_effect=original) as espia:
         handle_inbound_message(gateway, "PAC-CORR-5B", "demo", "m1", "quiero agendar una cita")
+        handle_inbound_message(gateway, "PAC-CORR-5B", "demo", "m1b", "1")  # elige fecha (recado 035)
         handle_inbound_message(gateway, "PAC-CORR-5B", "demo", "m2", "la primera")
         respuesta = handle_inbound_message(gateway, "PAC-CORR-5B", "demo", "m3", "quiero reprogramar mi cita")
 
@@ -144,6 +149,7 @@ def test_reprogramacion_via_recordatorio_y_via_inbound_llaman_al_mismo_metodo(se
         contact_patient(contexto)
 
         handle_patient_message(contexto, "m1", "sí, me interesa")
+        handle_patient_message(contexto, "m1b", "1")  # elige fecha (recado 035)
         handle_patient_message(contexto, "m2", "la primera")
         appointment_id = contexto.activity.appointment_id
         recordatorio = services["reminder_manager"].for_appointment(appointment_id)[0]
@@ -159,6 +165,7 @@ def test_reprogramacion_via_recordatorio_y_via_inbound_llaman_al_mismo_metodo(se
             services["reminder_manager"], services["result_sink"],
         )
         handle_inbound_message(gw, "PAC-REM-B", "demo", "m1", "quiero agendar una cita")
+        handle_inbound_message(gw, "PAC-REM-B", "demo", "m1b", "1")  # elige fecha (recado 035)
         handle_inbound_message(gw, "PAC-REM-B", "demo", "m2", "la primera")
         handle_inbound_message(gw, "PAC-REM-B", "demo", "m3", "quiero reprogramar mi cita")
 
@@ -171,6 +178,7 @@ def test_reprogramacion_via_recordatorio_y_via_inbound_llaman_al_mismo_metodo(se
 # ---------------------------------------------------------------------
 def test_confirmar_cita_no_pisa_el_estado_de_la_agenda(gateway, services):
     handle_inbound_message(gateway, "PAC-CORR-6", "demo", "m1", "quiero agendar una cita")
+    handle_inbound_message(gateway, "PAC-CORR-6", "demo", "m1b", "1")  # elige fecha (recado 035)
     handle_inbound_message(gateway, "PAC-CORR-6", "demo", "m2", "la primera")
     appointment_id = services["appointment_service"].get_patient_appointments("PAC-CORR-6")[0].appointment_id
 

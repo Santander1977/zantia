@@ -99,10 +99,12 @@ def _resolver_consulta_catalogo(gateway: "HealthGateway", request: PatientReques
     if not servicios:
         return _MENSAJE_INFORMACION_GENERICA
 
+    nombre = _nombre_conocido(gateway, request.patient_reference)
     activity = _nueva_activity_sintetica(
         _documento_resuelto(gateway, request.patient_reference), channel,
         objective="Solicitud del paciente: consultar catálogo de servicios",
         service=None,
+        patient_contact={"nombre": nombre} if nombre else {},
     )
     activity = gateway.activity_source.create(activity)
     context = build_health_agent_context(
@@ -356,10 +358,21 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
     # venció"): simplemente no se hidrata, y el gate de abajo dispara el
     # wizard completo de nuevo, exactamente igual que un teléfono nuevo
     # (requisito #1.2, deliberadamente sin UX dedicada para este caso).
+    nombre_para_saludo = None
     if patient_reference not in gateway._identidad_resuelta and _requiere_identidad_real(gateway):
         registro = gateway.identity_store.get(patient_reference)
         if registro is not None and registro.vigente():
             gateway._identidad_resuelta[patient_reference] = registro.documento
+            # Recado 034, pedido explícito: un paciente reconocido
+            # automáticamente (fila ya VERIFICADA y vigente de una
+            # conversación anterior — nunca repite el wizard) debe
+            # escuchar su nombre en el saludo, no solo quedar
+            # identificado en silencio. Se calcula acá, ANTES de
+            # enrutar el mensaje, y se antepone al resultado abajo —
+            # nunca se repite en turnos siguientes de la MISMA
+            # conversación, porque `patient_reference` ya queda en
+            # `_identidad_resuelta` (esta rama no se vuelve a alcanzar).
+            nombre_para_saludo = registro.nombre
 
     if (
         channel in _CANALES_SIN_IDENTIFICADOR_DOCUMENTO
@@ -368,7 +381,19 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
     ):
         return _gestionar_identificacion(gateway, patient_reference, channel, text)
 
-    # No hay conversación abierta -> es una PatientRequest genuina.
+    respuesta = _enrutar_solicitud_nueva(gateway, patient_reference, channel, message_id, text)
+    if nombre_para_saludo:
+        respuesta = f"¡Hola, {nombre_para_saludo}! {respuesta}"
+    return respuesta
+
+
+def _enrutar_solicitud_nueva(
+    gateway: "HealthGateway", patient_reference: str, channel: str, message_id: str, text: str
+) -> str:
+    """Clasifica y resuelve un mensaje SIN conversación previa abierta —
+    extraído de `handle_inbound_message` (recado 034) para poder
+    anteponerle un saludo con nombre cuando corresponde, sin repetir
+    esta lógica de enrutamiento en cada rama."""
     intent = classify_intent(text)
     request = gateway.patient_request_source.create(
         PatientRequest(
@@ -434,10 +459,12 @@ def _determinar_servicio_inicial(gateway: "HealthGateway"):
 
 def _resolver_programar_cita(gateway: HealthGateway, request: PatientRequest, channel: str, message_id: str, text: str) -> str:
     servicio_inicial, mensaje_preguntar_servicio = _determinar_servicio_inicial(gateway)
+    nombre = _nombre_conocido(gateway, request.patient_reference)
     activity = _nueva_activity_sintetica(
         _documento_resuelto(gateway, request.patient_reference), channel,
         objective="Solicitud del paciente: programar cita",
         service=servicio_inicial,
+        patient_contact={"nombre": nombre} if nombre else {},
     )
     activity = gateway.activity_source.create(activity)
     context = build_health_agent_context(
@@ -501,11 +528,13 @@ def _resolver_gestion_de_cita_existente(
     if getattr(gateway.appointment_service, "requires_verification_code", False):
         return _iniciar_verificacion_para_gestion(gateway, request, cita)
 
+    nombre = _nombre_conocido(gateway, request.patient_reference)
     activity = _nueva_activity_sintetica(
         _documento_resuelto(gateway, request.patient_reference), channel,
         objective="Solicitud del paciente: gestionar cita existente",
         appointment_id=cita.appointment_id,
         service=cita.service,
+        patient_contact={"nombre": nombre} if nombre else {},
     )
     activity = gateway.activity_source.create(activity)
     context = build_health_agent_context(
@@ -786,11 +815,17 @@ def _procesar_intento_de_codigo(gateway: HealthGateway, patient_reference: str, 
     del gateway._pending_verifications[patient_reference]
     _reportar_resultado_verificado(gateway, pendiente, cita_resultado)
 
+    # Nombre real (recado 034) y correo de confirmación (recado 035,
+    # misma frase que `agent.py` — hrmm-backend ya lo envía de forma
+    # NATIVA al ejecutar el POST real de cancelar/reprogramar, ZANTIA
+    # nunca lo duplica).
+    nombre = _nombre_conocido(gateway, patient_reference)
+    saludo_nombre = f", {nombre}" if nombre else ""
     if pendiente["action"] == "cancelar":
-        return "Listo, tu cita quedó cancelada."
+        return f"Listo{saludo_nombre}, tu cita quedó cancelada. Te enviamos un correo de confirmación con todos los detalles."
     return (
-        f"Listo, tu cita quedó reprogramada: {cita_resultado.service} el {cita_resultado.date} "
-        f"a las {cita_resultado.time} en {cita_resultado.location}."
+        f"Listo{saludo_nombre}, tu cita quedó reprogramada: {cita_resultado.service} el {cita_resultado.date} "
+        f"a las {cita_resultado.time} en {cita_resultado.location}. Te enviamos un correo de confirmación con todos los detalles."
     )
 
 
@@ -893,6 +928,18 @@ def _documento_resuelto(gateway: HealthGateway, patient_reference: str) -> str:
     return gateway._identidad_resuelta.get(patient_reference, patient_reference)
 
 
+def _nombre_conocido(gateway: "HealthGateway", patient_reference: str) -> Optional[str]:
+    """Nombre real ya persistido en `identity_store` (recado 034) para
+    este identificador de canal — `None` si nunca se verificó por este
+    mecanismo (MockAppointmentService, o un paciente todavía sin
+    identidad resuelta). Se usa para poblar `Activity.patient_contact`
+    al crear una Activity sintética, así `HealthBrain`/`agent.py` pueden
+    referenciarlo (confirmar una reserva, despedirse) sin volver a
+    consultar `buscar_paciente`."""
+    registro = gateway.identity_store.get(patient_reference)
+    return registro.nombre if registro is not None else None
+
+
 def _gestionar_identificacion(gateway: HealthGateway, patient_reference: str, channel: str, text: str) -> str:
     """Wizard determinista de 3 pasos (pedir documento -> validar contra
     buscar-paciente -> confirmar con código de verificación, recado
@@ -919,7 +966,12 @@ def _gestionar_identificacion(gateway: HealthGateway, patient_reference: str, ch
     documento = text.strip()
     identidad = resolve_patient_identity(gateway, documento) if documento else None
     if identidad is not None:
-        return _iniciar_verificacion_de_identidad(gateway, patient_reference, documento)
+        # Recado 034: el nombre real ya viene en la respuesta de
+        # buscar-paciente — se lleva hasta `marcar_verificado` para
+        # persistirlo UNA SOLA VEZ (nunca se vuelve a pedir a
+        # hrmm-backend solo para saludar).
+        nombre = identidad.get("nombre_paciente")
+        return _iniciar_verificacion_de_identidad(gateway, patient_reference, documento, nombre)
 
     pendiente["intentos"] += 1
     if pendiente["intentos"] >= _MAX_INTENTOS_IDENTIFICACION:
@@ -941,14 +993,20 @@ def _gestionar_identificacion(gateway: HealthGateway, patient_reference: str, ch
     return _MENSAJE_DOCUMENTO_NO_ENCONTRADO
 
 
-def _iniciar_verificacion_de_identidad(gateway: HealthGateway, patient_reference: str, documento: str) -> str:
+def _iniciar_verificacion_de_identidad(
+    gateway: HealthGateway, patient_reference: str, documento: str, nombre: Optional[str] = None
+) -> str:
     """Documento confirmado contra buscar-paciente — antes de asociarlo
     como confiable (recado 014, requisito #2c), se exige un segundo
     factor: código de 6 dígitos al correo del paciente (mismo mecanismo
     ya construido en 009 para cancelar/reprogramar,
     `send_verification_code` — sin inventar uno nuevo). Se registra la
     fila PENDIENTE_VERIFICACION en `identity_store` desde ya (requisito
-    #1: la tabla debe reflejar el estado intermedio, no solo el final)."""
+    #1: la tabla debe reflejar el estado intermedio, no solo el final).
+    `nombre` (recado 034) viaja en `_pending_identity` hasta el paso
+    final (`_procesar_codigo_de_identificacion`), donde recién se
+    persiste — nunca antes de que la identidad quede VERIFICADA de
+    verdad."""
     from .appointment_service import AppointmentServiceError
 
     gateway.identity_store.guardar_pendiente(patient_reference, documento)
@@ -966,6 +1024,7 @@ def _iniciar_verificacion_de_identidad(gateway: HealthGateway, patient_reference
         "intentos": 0,
         "stage": "esperando_codigo",
         "documento_candidato": documento,
+        "nombre_candidato": nombre,
     }
     correo_parcial = resultado_envio.get("correo_parcial")
     pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
@@ -997,9 +1056,12 @@ def _procesar_codigo_de_identificacion(
     if not valido:
         return _MENSAJE_CODIGO_INVALIDO
 
+    nombre = pendiente.get("nombre_candidato")
     del gateway._pending_identity[patient_reference]
-    gateway.identity_store.marcar_verificado(patient_reference, documento)
+    gateway.identity_store.marcar_verificado(patient_reference, documento, nombre)
     gateway._identidad_resuelta[patient_reference] = documento
+    if nombre:
+        return f"¡Gracias, {nombre}! Ya confirmé tu identidad. ¿En qué te puedo ayudar hoy? Puedo programar, reprogramar, cancelar o consultar tus citas."
     return _MENSAJE_IDENTIDAD_CONFIRMADA
 
 

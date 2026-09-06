@@ -69,7 +69,7 @@ def test_responder_con_servicio_real_tras_preguntar_catalogo_avanza_a_disponibil
     assert "medicina general" in r1.lower() and "pediatria" in r1.lower()
 
     r2 = handle_inbound_message(gateway, pref, "telegram", "m2", "Medicina general")
-    assert "opciones disponibles" in r2.lower(), (
+    assert "fechas disponibles" in r2.lower(), (
         "responder con un servicio real del catálogo debe avanzar a disponibilidad, "
         "no caer en el fallback genérico de sí/no (bug real, recado 031)"
     )
@@ -81,7 +81,7 @@ def test_responder_con_el_segundo_servicio_del_catalogo_tambien_avanza():
     pref = "TG-031-2"
     handle_inbound_message(gateway, pref, "telegram", "m1", "que servicios tienen")
     r2 = handle_inbound_message(gateway, pref, "telegram", "m2", "pediatria")
-    assert "opciones disponibles" in r2.lower()
+    assert "fechas disponibles" in r2.lower()
 
 
 # ---------------------------------------------------------------------
@@ -109,7 +109,7 @@ def test_pregunta_de_catalogo_a_mitad_de_conversacion_tambien_deja_esperando_ser
     assert "medicina general" in r1.lower() and "pediatria" in r1.lower()
 
     r2 = handle_patient_message(context, "m2", "pediatria")
-    assert "opciones disponibles" in r2.lower()
+    assert "fechas disponibles" in r2.lower()
 
 
 # ---------------------------------------------------------------------

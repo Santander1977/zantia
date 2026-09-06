@@ -104,7 +104,10 @@ def test_reserva_real_con_estado_no_mapeado_se_confirma_de_todas_formas(monkeypa
     gateway, citas_creadas = _gateway_con_estado_no_mapeado(monkeypatch, "pendiente")
 
     r1 = handle_inbound_message(gateway, "999", "demo", "m1", "necesito una cita")
-    assert "opciones disponibles" in r1.lower()
+    assert "fechas disponibles" in r1.lower()
+
+    r1b = handle_inbound_message(gateway, "999", "demo", "m1b", "1")  # elige fecha (recado 035)
+    assert "horarios disponibles" in r1b.lower()
 
     r2 = handle_inbound_message(gateway, "999", "demo", "m2", "la primera")
     assert "confirmado" in r2.lower(), (
@@ -124,6 +127,7 @@ def test_reserva_real_con_estado_no_mapeado_se_confirma_de_todas_formas(monkeypa
 def test_reserva_real_actualiza_management_status_y_appointment_id(monkeypatch):
     gateway, _ = _gateway_con_estado_no_mapeado(monkeypatch, "pendiente")
     handle_inbound_message(gateway, "999", "demo", "m1", "necesito una cita")
+    handle_inbound_message(gateway, "999", "demo", "m1b", "1")  # elige fecha (recado 035)
     handle_inbound_message(gateway, "999", "demo", "m2", "la primera")
 
     actividades = [
@@ -145,5 +149,6 @@ def test_reserva_real_con_estado_ya_mapeado_sigue_funcionando_como_antes(monkeyp
     la corrección no depende de que el estado esté mal mapeado."""
     gateway, _ = _gateway_con_estado_no_mapeado(monkeypatch, "reservada")
     handle_inbound_message(gateway, "999", "demo", "m1", "necesito una cita")
+    handle_inbound_message(gateway, "999", "demo", "m1b", "1")  # elige fecha (recado 035)
     r2 = handle_inbound_message(gateway, "999", "demo", "m2", "la primera")
     assert "confirmado" in r2.lower()

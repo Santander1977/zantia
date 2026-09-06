@@ -73,23 +73,31 @@ def test_ciclo_completo_servicio_disponibilidad_reserva_confirmacion(
     # 1. Catálogo / intención inicial — nunca debe saltar directo a
     #    disponibilidad de un servicio no confirmado (recado 030/031).
     r1 = handle_inbound_message(gateway, patient_reference, "telegram", "m1", mensaje_inicial)
-    assert "opciones disponibles" not in r1.lower(), (
+    assert "fechas disponibles" not in r1.lower() and "horarios disponibles" not in r1.lower(), (
         f"[{patient_reference}] asumió disponibilidad antes de que el paciente eligiera servicio"
     )
 
     # 2. Elegir servicio real del catálogo (recado 031: debe reconocerse
-    #    vía 'esperando_servicio', nunca caer al fallback de sí/no).
+    #    vía 'esperando_servicio', nunca caer al fallback de sí/no) — el
+    #    siguiente paso es el PASO 2 del asistente en etapas (recado
+    #    035): fechas reales, nunca horarios todavía.
     r2 = handle_inbound_message(gateway, patient_reference, "telegram", "m2", servicio_elegido)
     assert "no logré entender si es un sí o un no" not in r2.lower(), (
         f"[{patient_reference}] '{servicio_elegido}' no se reconoció como elección de servicio"
     )
-    assert "opciones disponibles" in r2.lower(), f"[{patient_reference}] no ofreció disponibilidad real"
+    assert "fechas disponibles" in r2.lower(), f"[{patient_reference}] no ofreció fechas reales"
 
-    # 3. Reservar una de las opciones reales ofrecidas.
-    r3 = handle_inbound_message(gateway, patient_reference, "telegram", "m3", seleccion)
+    # 3. Elegir fecha (recado 035, PASO 2 -> PASO 3: horarios reales de
+    #    esa fecha, nunca combinados con la fecha).
+    r2b = handle_inbound_message(gateway, patient_reference, "telegram", "m2b", seleccion)
+    assert "horarios disponibles" in r2b.lower(), f"[{patient_reference}] no ofreció horarios reales: {r2b!r}"
+
+    # 4. Reservar el único horario real de esa fecha (este fixture tiene
+    #    exactamente un turno por fecha, ver `_CatalogoCompleto`).
+    r3 = handle_inbound_message(gateway, patient_reference, "telegram", "m3", "1")
     assert "confirmado" in r3.lower(), f"[{patient_reference}] no confirmó la reserva: {r3!r}"
 
-    # 4. Confirmación real del lado del dominio: Activity + AppointmentService
+    # 5. Confirmación real del lado del dominio: Activity + AppointmentService
     #    coinciden en que la cita quedó CONFIRMED — nunca solo un texto
     #    optimista sin respaldo real (principio ya establecido, recado 007).
     contexto = find_open_context(gateway, patient_reference) or gateway._contexts.get(
