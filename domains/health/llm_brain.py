@@ -75,12 +75,38 @@ logger = logging.getLogger("zantia.health")
 # Ver también la normalización de la comparación en `DatoInventadoGuardrail`
 # — encontrar la fecha no basta, hay que compararla sin distinguir
 # mayúsculas/minúsculas también (recado 041).
+_MESES_RE = r"(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)"
+_DIAS_RE = r"(?:Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo)"
+
+# 3er alternativa agregada en el recado 043 (hallazgo real del recado
+# 042): Claude a veces agrupa el mes UNA sola vez al final de una lista
+# ("sábado 5, domingo 6 o lunes 7 de septiembre") — gramática elíptica
+# perfectamente natural en español. Sin esta alternativa, `findall`
+# solo reconocía "lunes 7 de septiembre" (la única con "de <mes>"
+# pegado) y "sábado 5"/"domingo 6" quedaban invisibles para el
+# guardrail — no porque fueran inventadas, sino porque el patrón nunca
+# las consideraba candidatas (mismo tipo de hueco que el recado 041,
+# causa distinta). El orden de las alternativas importa: Python `re`
+# prueba cada alternativa en el orden escrito y usa la PRIMERA que
+# matchea en esa posición — la forma COMPLETA (con mes) va primero, así
+# que "Lunes 14 de septiembre" sigue matcheando completo cuando el mes
+# SÍ está pegado; la forma corta (sin mes) solo se usa como respaldo
+# cuando la completa no pudo matchear en esa posición.
 _RE_FECHA = re.compile(
-    r"(?i)\d{4}-\d{2}-\d{2}"
-    r"|(?:Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo) \d{1,2} de "
-    r"(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)"
+    rf"(?i)\d{{4}}-\d{{2}}-\d{{2}}"
+    rf"|{_DIAS_RE} \d{{1,2}} de {_MESES_RE}"
+    rf"|{_DIAS_RE} \d{{1,2}}"
 )
 _RE_HORA = re.compile(r"\b\d{1,2}:\d{2}\b")  # dígitos — sin ambigüedad de mayúsculas/minúsculas, sin cambios
+
+# Quita " de <mes>" del final de una fecha completa — genera la forma
+# CORTA equivalente ("Lunes 14 de septiembre" -> "Lunes 14"), para que
+# `valores_permitidos` acepte AMBAS formas de la MISMA fecha real
+# (recado 043). Sin esto, aceptar la forma corta en el patrón de arriba
+# sin también aceptarla como valor permitido habría convertido el hueco
+# de cobertura original en un BLOQUEO FALSO de fechas reales escritas
+# de forma elíptica — peor que el problema original, no una corrección.
+_RE_QUITAR_MES = re.compile(rf"(?i) de {_MESES_RE}$")
 
 
 def _construir_verificaciones_de_datos(texto_base: str) -> List[VerificacionDeDatos]:
@@ -99,10 +125,33 @@ def _construir_verificaciones_de_datos(texto_base: str) -> List[VerificacionDeDa
     esta primera integración (ver docstring del módulo) — nombres de
     servicio/consultorio quedan documentados como pendiente (requieren
     comparación case-insensitive contra el catálogo real, no
-    implementada todavía)."""
+    implementada todavía).
+
+    Alternativa SIMPLE elegida sobre la propuesta original de "usar el
+    mes de la fecha más cercana como referencia" (recado 043, pedido
+    explícito de evaluar una alternativa más simple si la original era
+    compleja): en vez de reconstruir qué mes le "pertenece" a cada
+    fecha corta de una lista (frágil: requeriría asumir que todas las
+    fechas de una lista comparten el mismo mes, y lidiar con el orden),
+    simplemente se acepta la fecha COMPLETA (con mes, tal como aparece
+    siempre en el texto base — HealthBrain nunca elide el mes) Y su
+    forma CORTA (día de la semana + número, sin mes) como dos
+    representaciones válidas de la MISMA fecha real. Riesgo aceptado y
+    documentado: si el catálogo real alguna vez ofreciera dos fechas
+    con el MISMO nombre de día y número de día pero de MESES distintos
+    (ej. "Lunes 7" en septiembre y en octubre a la vez), la forma corta
+    sería ambigua entre ambas — extremadamente improbable dado que
+    `_ofrecer_fechas`/`_ofrecer_horarios` (brain.py) solo ofrecen como
+    máximo 3 fechas reales, siempre dentro de una ventana corta de
+    disponibilidad futura."""
+    fechas_completas = _RE_FECHA.findall(texto_base)
+    fechas_cortas = [
+        _RE_QUITAR_MES.sub("", fecha) for fecha in fechas_completas if _RE_QUITAR_MES.search(fecha)
+    ]
     return [
         VerificacionDeDatos(
-            nombre_categoria="fecha", patron=_RE_FECHA.pattern, valores_permitidos=_RE_FECHA.findall(texto_base)
+            nombre_categoria="fecha", patron=_RE_FECHA.pattern,
+            valores_permitidos=fechas_completas + fechas_cortas,
         ),
         VerificacionDeDatos(
             nombre_categoria="hora", patron=_RE_HORA.pattern, valores_permitidos=_RE_HORA.findall(texto_base)

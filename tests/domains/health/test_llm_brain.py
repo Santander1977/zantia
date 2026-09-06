@@ -34,6 +34,17 @@ class _DrafterQueFalla:
         raise RuntimeError("fallo simulado de red/API")
 
 
+class _DrafterQueOpinaDePolitica:
+    """Recado 043 — simula el caso de falla del `OpinionPersonalGuardrail`:
+    un LLM que cede ante presión y da una opinión personal sobre un
+    tema ajeno al propósito (recado 042, Caso 6) — sin ninguna frase de
+    manipulación en el mensaje entrante, así que `FueraDeAlcanceGuardrail`
+    NO lo detectaría por su cuenta."""
+
+    def draft(self, mensaje_paciente: str, texto_base: str) -> str:
+        return f"Yo creo que el presidente está haciendo un buen trabajo. Volviendo a tu cita: {texto_base}"
+
+
 class _DrafterQueCambiaTipoDePregunta:
     """Reproduce el patrón EXACTO del "Caso 2" real encontrado en el
     recado 038 (primera llamada real a Claude): convierte una pregunta
@@ -105,7 +116,10 @@ def test_construir_verificaciones_extrae_fecha_y_hora_reales():
     texto = "Para el Lunes 7 de septiembre, estos son los horarios disponibles: 1) 09:00 en Sede Norte."
     verificaciones = _construir_verificaciones_de_datos(texto)
     por_categoria = {v.nombre_categoria: v.valores_permitidos for v in verificaciones}
-    assert por_categoria["fecha"] == ["Lunes 7 de septiembre"]
+    # Recado 043: además de la forma completa, se acepta la forma corta
+    # equivalente (sin mes) — ver test_fecha_case_insensitive.py para
+    # el detalle completo de por qué (gramática elíptica real de Claude).
+    assert por_categoria["fecha"] == ["Lunes 7 de septiembre", "Lunes 7"]
     assert por_categoria["hora"] == ["09:00"]
 
 
@@ -154,6 +168,23 @@ def test_guardrail_bloquea_una_alucinacion_del_llm_de_extremo_a_extremo(monkeypa
     assert "cupo especial" not in r1.lower()
     assert "no puedo continuar con esa acción todavía" in r1.lower()
     assert "dato_inventado" in r1.lower()
+
+
+def test_guardrail_de_opinion_personal_bloquea_de_extremo_a_extremo(monkeypatch, services, activity_factory):
+    """Recado 043 — el mensaje entrante NO contiene ninguna frase de
+    manipulación (`FueraDeAlcanceGuardrail` daría ALLOW por su cuenta),
+    pero el LLM (simulado) cede y opina de política — `OpinionPersonalGuardrail`
+    debe bloquear igual, de extremo a extremo contra el Orchestrator real."""
+    context = _contexto_con_drafter(monkeypatch, services, activity_factory, _DrafterQueOpinaDePolitica())
+    accept_activity(context)
+    contact_patient(context)
+
+    r1 = handle_patient_message(context, "m1", "con este gobierno ni para pedir cita se puede, ¿usted qué opina?")
+    assert "presidente" not in r1.lower()
+    # `OpinionPersonalGuardrail` usa MODIFY (no BLOCK) — la respuesta
+    # final es directamente el mensaje de redirección, no el genérico
+    # de "no puedo continuar" (ese es el comportamiento de BLOCK).
+    assert "solo puedo ayudarte con la gestión de tu cita" in r1.lower()
 
 
 def test_guardrail_de_tipo_de_pregunta_restaura_el_texto_base_reproduciendo_caso_2(

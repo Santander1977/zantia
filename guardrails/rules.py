@@ -309,6 +309,15 @@ _FRASES_DE_MANIPULACION = (
 )
 
 
+# Mensaje de redirección compartido por FueraDeAlcanceGuardrail (recado
+# 037) y OpinionPersonalGuardrail (recado 043) — mismo patrón de "vuelve
+# al propósito" para ambas capas de resistencia a desvío de tema.
+_MENSAJE_REDIRECCION_FUERA_DE_ALCANCE = (
+    "Solo puedo ayudarte con la gestión de tu cita — no puedo seguir instrucciones "
+    "que cambien mi forma de operar. ¿En qué más te ayudo con tu cita?"
+)
+
+
 class FueraDeAlcanceGuardrail:
     """Recado 037 — límite de alcance de la conversación, preparado
     para el día en que exista un Brain basado en LLM (ver docstring del
@@ -322,14 +331,14 @@ class FueraDeAlcanceGuardrail:
     Con el Brain determinista de hoy esto es en gran parte redundante
     (no puede desviarse porque no genera texto libre a partir de
     instrucciones del paciente) — documentado explícitamente, no
-    implementado como si ya resolviera el caso de un LLM real."""
+    implementado como si ya resolviera el caso de un LLM real.
+
+    Complementada por `OpinionPersonalGuardrail` (recado 043): esta
+    regla cubre manipulación EXPLÍCITA del mensaje entrante; aquella
+    cubre el caso en que el Brain/LLM CEDE de todas formas sin que el
+    paciente haya usado ninguna frase de manipulación reconocible."""
 
     name = "fuera_de_alcance"
-
-    _MENSAJE_REDIRECCION = (
-        "Solo puedo ayudarte con la gestión de tu cita — no puedo seguir instrucciones "
-        "que cambien mi forma de operar. ¿En qué más te ayudo con tu cita?"
-    )
 
     def evaluate(self, context: GuardrailContext) -> GuardrailResult:
         texto = (context.mensaje_entrante or "").lower()
@@ -338,11 +347,83 @@ class FueraDeAlcanceGuardrail:
                 return GuardrailResult(
                     decision=GuardrailDecision.MODIFY,
                     reason=f"Mensaje entrante contenía un intento de manipulación ('{frase}') — recado 037.",
-                    modified_response=self._MENSAJE_REDIRECCION,
+                    modified_response=_MENSAJE_REDIRECCION_FUERA_DE_ALCANCE,
                     guardrail_name=self.name,
                 )
         return GuardrailResult(
             decision=GuardrailDecision.ALLOW, reason="sin intento de manipulación detectado", guardrail_name=self.name
+        )
+
+
+# Marcadores de opinión/postura en PRIMERA PERSONA — deliberadamente
+# agnósticos de TEMA (recado 043): nunca se enumera "política",
+# "religión" ni ningún tema específico, porque esa lista siempre sería
+# incompleta y culturalmente sesgada. En cambio, se detecta la FORMA
+# LINGÜÍSTICA de una opinión propia — cualquier tema en el que el
+# Brain/LLM exprese una postura queda cubierto por igual. Ninguno de
+# estos coincide con el reconocimiento empático de lo que el PACIENTE
+# siente ("entiendo la frustración", "lamento que sea así" — sobre el
+# estado del paciente, nunca una postura del Brain sobre el tema en sí)
+# — verificado explícitamente con el texto real del recado 042 (Caso 6,
+# turno 1), que no activa ninguno de estos marcadores.
+_MARCADORES_OPINION_PERSONAL = (
+    "yo creo que",
+    "yo pienso que",
+    "en mi opinión",
+    "a mi parecer",
+    "a mi juicio",
+    "personalmente creo",
+    "personalmente pienso",
+    "personalmente opino",
+    "mi opinión es",
+    "desde mi punto de vista",
+    "si me preguntas a mí",
+    "estoy a favor de",
+    "estoy en contra de",
+    "yo apoyo a",
+    "yo no apoyo a",
+)
+
+
+class OpinionPersonalGuardrail:
+    """Recado 043 — red de seguridad de código COMPLEMENTARIA a
+    `FueraDeAlcanceGuardrail` (recado 037), no un reemplazo: aquella
+    revisa el MENSAJE ENTRANTE buscando manipulación explícita ("ignora
+    tus instrucciones"); esta revisa el TEXTO YA REDACTADO buscando que
+    el propio Brain/LLM haya cedido y expresado una opinión personal —
+    sin necesidad de que el paciente haya usado ninguna frase de
+    manipulación reconocible.
+
+    Hallazgo real que motivó esta regla (recado 042, Caso 6): una
+    presión sostenida y cortés a lo largo de varios turnos, sin ninguna
+    frase de manipulación explícita, en principio podría lograr que un
+    LLM ceda — y hasta este recado no existía ninguna capa de código
+    para ese escenario, solo el prompt de sistema (una sola capa, no
+    defensa en profundidad como en el caso de manipulación directa).
+
+    Vive en el Core (no en `domains/health/`): la detección no depende
+    de vocabulario de salud/citas — es agnóstica también de DOMINIO,
+    igual que `FueraDeAlcanceGuardrail`, con la que comparte el mismo
+    mensaje de redirección."""
+
+    name = "opinion_personal"
+
+    def evaluate(self, context: GuardrailContext) -> GuardrailResult:
+        texto = (context.proposed_response or "").lower()
+        for marcador in _MARCADORES_OPINION_PERSONAL:
+            if marcador in texto:
+                return GuardrailResult(
+                    decision=GuardrailDecision.MODIFY,
+                    reason=(
+                        f"La respuesta expresó una opinión personal ('{marcador}') sobre un tema "
+                        "ajeno al propósito de la conversación (recado 043) — nunca se deja pasar, "
+                        "sin importar el tema."
+                    ),
+                    modified_response=_MENSAJE_REDIRECCION_FUERA_DE_ALCANCE,
+                    guardrail_name=self.name,
+                )
+        return GuardrailResult(
+            decision=GuardrailDecision.ALLOW, reason="sin opinión personal detectada", guardrail_name=self.name
         )
 
 
@@ -360,4 +441,5 @@ def reglas_core_por_defecto(tool_categories: Dict[str, object]) -> List[Guardrai
         TipoDePreguntaAlteradaGuardrail(),
         ConfirmacionEstructuradaRequeridaParaWriteGuardrail(tool_categories),
         FueraDeAlcanceGuardrail(),
+        OpinionPersonalGuardrail(),
     ]
