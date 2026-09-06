@@ -126,6 +126,16 @@ class HrmmAppointmentService:
             raise AppointmentServiceError(f"buscar-paciente respondió {respuesta.status}")
         return respuesta.body  # {"nombre_paciente":..., "telefono":...}
 
+    def list_services(self) -> List[str]:
+        """Extensión duck-typed (recado 027, mismo criterio que
+        `buscar_paciente`/`requires_verification_code` — no forma parte
+        del Protocol `AppointmentService` formal): nombres reales del
+        catálogo ya sincronizado (`CatalogMirror`, `GET
+        /api/agenda/servicios`), nunca inventados. Si el catálogo
+        todavía no sincronizó, devuelve una lista vacía — quien llama
+        decide el mensaje de fallback, esto nunca inventa un nombre."""
+        return self._catalog.listar_nombres()
+
     # ------------------------------------------------------------------
     # AppointmentService Protocol
     # ------------------------------------------------------------------

@@ -192,4 +192,9 @@ def test_mock_appointment_service_ignora_la_frase_de_beneficiario(monkeypatch):
     respuesta = handle_patient_message(context, "m1", "es para mi mamá")
     estado = context.orchestrator.store.get(context.activity.activity_id)
     assert estado.datos_recopilados.get("etapa") != "esperando_documento_beneficiario"
-    assert "¿te gustaría que te ayude" in respuesta.lower()
+    # Recado 027: la redacción de este fallback de sí/no se varió a
+    # propósito (dejó de repetirse literalmente turno tras turno) — la
+    # garantía que importa aquí es que sigue siendo la MISMA pregunta
+    # cerrada de sí/no, no el texto exacto.
+    assert "sí" in respuesta.lower() and "no" in respuesta.lower()
+    assert "agendar" in respuesta.lower() or "programar" in respuesta.lower()

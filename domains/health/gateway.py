@@ -53,17 +53,41 @@ _ACTIVITY_ESTADOS_CERRADOS = {
 }
 
 _MENSAJE_SIN_CITA_ACTIVA = (
-    "No encuentro una cita activa a tu nombre para gestionar. "
-    "Si quieres, puedo ayudarte a programar una nueva."
+    "No encuentro ninguna cita activa a tu nombre para gestionar. "
+    "Si quieres, con gusto te ayudo a programar una nueva."
 )
+# Mensaje de escalamiento (recado 002, lección de Dani) — deliberadamente
+# SIN cambios de redacción en el pase de tono del recado 027: es la
+# frase exacta que varios tests verifican como garantía de seguridad
+# ("pasar tu caso al equipo", nunca "contactamos"/"te llaman"), y un
+# mensaje de escalamiento prioriza claridad sobre calidez — el paciente
+# necesita saber con precisión qué va a pasar, no que suene amigable.
 _MENSAJE_ESCALAMIENTO_INBOUND = (
     "Voy a pasar tu caso al equipo para que lo revise. "
     "No puedo garantizarte un contacto ni un tiempo específico."
 )
 _MENSAJE_INFORMACION_GENERICA = (
-    "Puedo ayudarte a programar, reprogramar, cancelar o consultar una cita. "
+    "¡Claro! Puedo ayudarte a programar, reprogramar, cancelar o consultar una cita. "
     "¿Qué necesitas?"
 )
+
+
+def _mensaje_catalogo_real(gateway: "HealthGateway") -> str:
+    """Responde "qué servicios tienen" con el catálogo REAL ya
+    sincronizado (recado 027) — nunca inventado. `list_services()` es
+    duck-typed (mismo criterio que `buscar_paciente`), así que un
+    `AppointmentService` que no lo implemente, o un catálogo que todavía
+    no sincronizó (lista vacía), cae al mensaje genérico existente en
+    vez de mostrar una lista vacía o fallar."""
+    listar = getattr(gateway.appointment_service, "list_services", None)
+    servicios = listar() if listar else []
+    if not servicios:
+        return _MENSAJE_INFORMACION_GENERICA
+    texto_servicios = ", ".join(servicios)
+    return (
+        f"Estos son los servicios que tenemos disponibles: {texto_servicios}. "
+        "¿Te gustaría agendar una cita para alguno de ellos?"
+    )
 
 # Canales cuyo identificador (`patient_reference`) NO es un documento de
 # identidad (recado 012, R-15) — ChatwootChannel (número de WhatsApp) y,
@@ -325,7 +349,7 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
 
     if intent == RequestIntent.INFORMACION_SERVICIO:
         gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
-        return _MENSAJE_INFORMACION_GENERICA
+        return _mensaje_catalogo_real(gateway)
 
     if intent in (RequestIntent.REPROGRAMAR_CITA, RequestIntent.CANCELAR_CITA):
         return _resolver_gestion_de_cita_existente(gateway, request, channel, message_id, text)
@@ -523,9 +547,9 @@ def _resolver_consulta(gateway: HealthGateway, request: PatientRequest) -> str:
     ]
     gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
     if not citas:
-        return "No tienes ninguna cita activa registrada por este canal."
+        return "Revisé y no tienes ninguna cita activa registrada por este canal por ahora."
     detalles = "; ".join(f"{c.service} el {c.date} a las {c.time} en {c.location}" for c in citas)
-    return f"Tienes {len(citas)} cita(s) activa(s): {detalles}."
+    return f"Aquí tienes: {len(citas)} cita(s) activa(s): {detalles}."
 
 
 def _resolver_confirmacion(gateway: HealthGateway, request: PatientRequest) -> str:
@@ -554,7 +578,8 @@ def _resolver_confirmacion(gateway: HealthGateway, request: PatientRequest) -> s
 # (lectura pura, sin máquina de estados).
 # ---------------------------------------------------------------------
 _MENSAJE_CODIGO_INVALIDO = (
-    "Ese código no es válido o ya venció. Puedes escribir uno nuevo, o pedir que te reenviemos otro."
+    "Ese código no es válido o ya venció. Sin problema — puedes escribir uno nuevo, "
+    "o pedirme que te reenviemos otro."
 )
 
 
@@ -583,8 +608,18 @@ def _iniciar_verificacion_para_gestion(gateway: HealthGateway, request: PatientR
     if accion == "reprogramar":
         opciones = gateway.appointment_service.get_availability(cita.service)[:3]
         if not opciones:
+            # NUNCA "te contactamos" (recado 027, hallazgo real — mismo
+            # patrón que recado 026, pero esta rama es TODAVÍA más
+            # delicada: este sub-flujo de verificación por código vive
+            # completo en este archivo, fuera del Orchestrator/Core, así
+            # que `NoPrometerContactoGuardrail` nunca llega a verla —
+            # esta frase se le habría enviado al paciente TAL CUAL, sin
+            # ninguna red de seguridad).
             gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
-            return "Por ahora no tengo otros horarios disponibles para reprogramar, te contactamos pronto."
+            return (
+                "Lamento decirte que por ahora no tengo otros horarios disponibles para reprogramar. "
+                "Escríbeme más tarde y lo revisamos de nuevo con gusto."
+            )
         gateway._pending_verifications[request.patient_reference] = {
             "action": accion,
             "appointment_id": cita.appointment_id,
@@ -624,7 +659,7 @@ def _enviar_codigo_y_pausar(
     }
     correo_parcial = resultado_envio.get("correo_parcial")
     pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
-    return f"Te enviamos un código{pista} para confirmar. Escríbelo aquí para continuar."
+    return f"Listo, te enviamos un código{pista} para confirmar. Escríbelo aquí para continuar cuando lo tengas."
 
 
 def _procesar_intento_de_codigo(gateway: HealthGateway, patient_reference: str, text: str) -> str:
@@ -738,16 +773,16 @@ def resolve_patient_identity(gateway: HealthGateway, documento_paciente: str) ->
 _MAX_INTENTOS_IDENTIFICACION = 3
 
 _MENSAJE_PEDIR_DOCUMENTO = (
-    "Antes de continuar, ¿me confirmas tu número de documento de identidad? "
-    "Lo necesito para consultar tus datos de forma segura."
+    "¡Hola! Antes de seguir, ¿me confirmas tu número de documento de identidad? "
+    "Lo necesito para consultar tus datos con seguridad."
 )
 _MENSAJE_IDENTIDAD_CONFIRMADA = (
-    "Gracias, ya confirmé tu identidad. ¿En qué te puedo ayudar? "
-    "Puedo programar, reprogramar, cancelar o consultar una cita."
+    "¡Gracias! Ya confirmé tu identidad. ¿En qué te puedo ayudar hoy? "
+    "Puedo programar, reprogramar, cancelar o consultar tus citas."
 )
 _MENSAJE_DOCUMENTO_NO_ENCONTRADO = (
-    "No encontré ningún paciente registrado con ese documento. "
-    "¿Puedes verificarlo y escribirlo de nuevo?"
+    "No encontré ningún paciente registrado con ese documento — "
+    "¿puedes revisarlo y escribírmelo de nuevo?"
 )
 
 
@@ -845,7 +880,7 @@ def _iniciar_verificacion_de_identidad(gateway: HealthGateway, patient_reference
     }
     correo_parcial = resultado_envio.get("correo_parcial")
     pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
-    return f"Te enviamos un código{pista} para confirmar tu identidad. Escríbelo aquí para continuar."
+    return f"Listo, te enviamos un código{pista} para confirmar tu identidad. Escríbelo aquí cuando lo tengas."
 
 
 def _procesar_codigo_de_identificacion(

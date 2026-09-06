@@ -73,6 +73,7 @@ class MockAppointmentService:
         self._slots: Dict[str, AvailabilitySlot] = {}
         self._appointments: Dict[str, Appointment] = {}
         self._idempotency: Dict[str, str] = {}  # idempotency_key -> appointment_id
+        self._catalogo_servicios: List[str] = []
         self._seed_fictional_data()
 
     def _seed_fictional_data(self) -> None:
@@ -82,6 +83,11 @@ class MockAppointmentService:
             ("medicina general", "Profesional B", "Sede Centro", "2026-09-06", "14:00"),
             ("medicina general", "Profesional B", "Sede Centro", "2026-09-07", "11:00"),
         ]
+        # Catálogo de NOMBRES de servicio, separado de `_slots` (recado
+        # 027): `_slots` es disponibilidad, que se consume al reservar —
+        # el catálogo de qué servicios existen no debe desaparecer solo
+        # porque un servicio se quedó momentáneamente sin cupos.
+        self._catalogo_servicios = list(dict.fromkeys(servicio for servicio, *_ in datos))
         for servicio, profesional, sede, fecha, hora in datos:
             slot = AvailabilitySlot(
                 slot_id=str(uuid.uuid4()),
@@ -105,6 +111,11 @@ class MockAppointmentService:
             if s.service.lower() == service.lower()
             and (location is None or s.location.lower() == location.lower())
         ]
+
+    def list_services(self) -> List[str]:
+        """Ver comentario equivalente en `HrmmAppointmentService`
+        (recado 027) — mismo método, catálogo ficticio en vez de real."""
+        return list(self._catalogo_servicios)
 
     def book_appointment(
         self, slot_id: str, patient_reference: str, idempotency_key: str

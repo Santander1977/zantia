@@ -162,3 +162,37 @@ def test_sin_cita_activa_no_ofrece_ni_pide_codigo(hrmm_gateway):
     respuesta = handle_inbound_message(gateway, "999", "demo", "m1", "cancelar mi cita")
     assert "no encuentro" in respuesta.lower()
     assert "999" not in gateway._pending_verifications
+
+
+def test_reprogramar_sin_disponibilidad_no_promete_contacto(monkeypatch):
+    """Bug real (recado 027, mismo patrón que recado 026): este
+    sub-flujo de verificación por código vive completo en
+    `gateway.py`, fuera del Orchestrator/Core — `NoPrometerContactoGuardrail`
+    NUNCA lo ve. Antes de este fix, "sin disponibilidad para
+    reprogramar" se enviaba al paciente con la frase prohibida
+    "te contactamos" TAL CUAL, sin ninguna red de seguridad detrás."""
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+
+    def generador(method, path, params, json_body, headers):
+        if method == "GET" and path == "/api/agenda/servicios":
+            return HttpResponse(200, [{"servicio_id": "S1", "nombre": "medicina general"}])
+        if method == "GET" and path == "/api/agenda/medicos":
+            return HttpResponse(200, [{"medico_id": "M1", "nombre_completo": "Dra. Ana Pérez", "servicio_id": "S1", "consultorio": "Consultorio 3"}])
+        if method == "GET" and path == "/api/agenda/disponibilidad":
+            return HttpResponse(200, [])  # sin disponibilidad para reprogramar
+        if method == "GET" and path == "/api/agenda/citas":
+            documento = params.get("documento_paciente")
+            return HttpResponse(200, [_CITA_BASE] if documento == "999" else [])
+        raise AssertionError(f"no programado en este test: {method} {path} {params}")
+
+    http = FakeHttpClient(generador=generador)
+    catalog = CatalogMirror()
+    catalog.sync(http)
+    service = HrmmAppointmentService(http, catalog)
+    gateway = build_health_gateway(MockActivitySource(), service, ReminderManager(), MockActivityResultSink())
+
+    respuesta = handle_inbound_message(gateway, "999", "demo", "m1", "quiero reprogramar mi cita")
+
+    assert "te contactamos" not in respuesta.lower()
+    assert "no tengo otros horarios disponibles" in respuesta.lower()
+    assert "999" not in gateway._pending_verifications

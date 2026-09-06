@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from .hrmm_http import HttpClient
 
@@ -87,6 +87,13 @@ class CatalogMirror:
     def nombre_por_servicio_id(self, servicio_id: str) -> Optional[str]:
         servicio = self._servicios.get(servicio_id)
         return servicio.nombre if servicio else None
+
+    def listar_nombres(self) -> List[str]:
+        """Nombres reales de servicio, ordenados — única fuente para
+        responder "qué servicios tienen" (recado 027): HealthBrain/
+        gateway.py NUNCA deben inventar ni asumir un nombre de servicio,
+        solo listar lo que este espejo sincronizó de verdad."""
+        return sorted(s.nombre for s in self._servicios.values())
 
     def medico(self, medico_id: str) -> Optional[MedicoCatalogo]:
         return self._medicos.get(medico_id)

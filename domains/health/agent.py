@@ -188,7 +188,7 @@ def handle_patient_message(context: HealthAgentContext, message_id: str, text: s
             verbo = "confirmado" if just_booked else "reprogramado"
             respuesta = (
                 respuesta
-                + f" Quedó {verbo}: {cita.service} el {cita.date} a las {cita.time} en {cita.location}."
+                + f" ¡Listo! Quedó {verbo}: {cita.service} el {cita.date} a las {cita.time} en {cita.location}."
             )
             evento = "APPOINTMENT_CONFIRMED" if just_booked else "APPOINTMENT_RESCHEDULED"
             context.orchestrator.events.record(context.activity.activity_id, EventType.STATE_TRANSITION, evento=evento)

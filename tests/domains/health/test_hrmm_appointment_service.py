@@ -65,6 +65,20 @@ def test_catalog_sync_puebla_el_espejo(catalog):
     assert catalog.medico("M1").consultorio == "Consultorio 3"
 
 
+def test_list_services_devuelve_catalogo_real_sincronizado(service):
+    """Recado 027 — `list_services()` (duck-typed, mismo criterio que
+    `buscar_paciente`) nunca inventa nombres: solo lo que `CatalogMirror`
+    ya sincronizó de `GET /api/agenda/servicios`."""
+    assert service.list_services() == ["medicina general"]
+
+
+def test_list_services_vacio_si_el_catalogo_no_sincronizo():
+    catalog_sin_sincronizar = CatalogMirror()
+    http = FakeHttpClient()
+    service_sin_sync = HrmmAppointmentService(http, catalog_sin_sincronizar)
+    assert service_sin_sync.list_services() == []
+
+
 def test_get_availability_traduce_ids_del_catalogo(http, service):
     http.programar(
         "GET", "/api/agenda/disponibilidad",

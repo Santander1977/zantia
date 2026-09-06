@@ -46,6 +46,24 @@ _DECLINA = ("no me interesa", "no gracias", "no quiero", "no estoy interesado", 
 # reintroduciría el falso positivo que el diseño original evitaba).
 _ACEPTA_PALABRA_UNICA = ("si", "sí")
 _DECLINA_PALABRA_UNICA = ("no",)
+# Pregunta por el catálogo de servicios SIN nombrar uno específico
+# (recado 027, bug real: "Programar cuál servicios tienes disponible" no
+# se reconocía como esto — caía a `_PROGRAMAR` en `intent.py` por la
+# palabra suelta "programar", y una vez dentro de la conversación
+# tampoco había ningún patrón aquí que la reconociera, así que quedaba
+# rebotando entre la pregunta fija de sí/no y "sin disponibilidad" para
+# el servicio por defecto ("medicina general", nunca confirmado por el
+# paciente). Mismas frases que `intent.py:_INFORMACION`, deliberadamente
+# duplicadas en vez de importadas: `intent.py` clasifica un mensaje
+# ENTRANTE sin conversación previa; esto reconoce la misma pregunta
+# DENTRO de una conversación ya abierta — capas distintas, incluso si
+# hoy el catálogo de frases coincide.
+_CONSULTAR_SERVICIOS = (
+    "qué servicios tienen", "qué servicios tienes", "qué servicios ofrecen",
+    "cuáles servicios", "cuál servicios", "cuál servicio", "qué servicios hay",
+    "servicios disponibles", "qué tienes disponible", "qué tienen disponible",
+    "cuál tienes", "cuáles tienes",
+)
 _HUMANO = ("hablar con alguien", "persona real", "un humano", "un asesor", "quiero hablar con")
 _NO_PUEDE_AHORA = ("no puedo ahora", "ahora no puedo", "en otro momento", "llámame después", "más tarde no")
 _PIDE_INFO = ("qué es", "más información", "cuéntame más", "por qué me contactan", "explícame", "de qué se trata")
@@ -190,9 +208,9 @@ class HealthBrain:
             return BrainOutput(
                 senales_detectadas=["informacion_no_autorizada"],
                 respuesta_propuesta=(
-                    "Eso no lo tengo disponible por este canal — no puedo darte información "
-                    "clínica que no esté autorizada aquí. Si quieres, puedo poner en contacto "
-                    "al equipo para resolver esa duda."
+                    "Uy, esa parte no te la puedo compartir por este canal — no puedo darte información "
+                    "clínica que no esté autorizada aquí. Si quieres, con gusto pongo tu duda "
+                    "en manos del equipo para que te ayuden con eso."
                 ),
                 proxima_accion_propuesta="preguntar_intencion",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
@@ -202,7 +220,7 @@ class HealthBrain:
             nuevos = {**datos, "etapa": "finalizada", "decision": "DECLINED"}
             return BrainOutput(
                 senales_detectadas=["paciente_declina"],
-                respuesta_propuesta="Entiendo, gracias por tu tiempo. Si cambias de opinión, aquí estamos.",
+                respuesta_propuesta="Entiendo perfectamente, gracias por tu tiempo. Si más adelante cambias de opinión, aquí voy a estar.",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
 
@@ -210,7 +228,7 @@ class HealthBrain:
             nuevos = {**datos, "etapa": "escalada"}
             return BrainOutput(
                 senales_detectadas=["solicita_humano"],
-                respuesta_propuesta="Claro, voy a poner tu caso en manos de una persona del equipo.",
+                respuesta_propuesta="Claro que sí, voy a poner tu caso en manos de una persona del equipo.",
                 propuesta_de_actualizacion_de_estado={
                     "datos_recopilados": nuevos,
                     "necesidad_de_escalar": True,
@@ -221,17 +239,50 @@ class HealthBrain:
         if _contains_any(texto, _NO_PUEDE_AHORA):
             nuevos = {**datos, "etapa": "finalizada", "decision": "NO_PUEDE_AHORA"}
             return BrainOutput(
-                respuesta_propuesta="Sin problema, lo intentamos en otro momento. Gracias por tu tiempo.",
+                respuesta_propuesta="Sin problema, lo intentamos en otro momento — gracias por tu tiempo.",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
 
         if _contains_any(texto, _PIDE_INFO):
+            # NUNCA "te contactamos" (mismo hallazgo del recado 026,
+            # esta rama se había quedado sin corregir): esa frase está en
+            # `guardrails/rules.py:_PROMESAS_PROHIBIDAS` y
+            # `NoPrometerContactoGuardrail` la reescribe en silencio por
+            # el mensaje genérico de escalamiento.
             motivo = self._activity.reason or self._activity.program or "una atención pendiente"
             return BrainOutput(
                 respuesta_propuesta=(
-                    f"Te contactamos por {motivo}. La idea es ayudarte a programar tu atención "
-                    "cuando te quede cómodo. ¿Te gustaría revisar opciones de horario?"
+                    f"Con gusto te cuento: esto es sobre {motivo}. La idea es ayudarte a "
+                    "programar tu atención cuando te quede cómodo. ¿Revisamos juntos las opciones de horario?"
                 ),
+                proxima_accion_propuesta="preguntar_intencion",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+            )
+
+        # Pregunta por el catálogo de servicios, sin nombrar uno
+        # específico (recado 027) — se responde con el catálogo REAL
+        # (`AppointmentService.list_services()`, duck-typed, nunca
+        # inventado) y se queda en la MISMA etapa ("esperando_decision")
+        # para que el paciente pueda seguir la conversación con
+        # normalidad después (p. ej. decir "sí" para ver disponibilidad,
+        # o nombrar uno de los servicios listados).
+        if _contains_any(texto, _CONSULTAR_SERVICIOS):
+            listar = getattr(self._appointment_service, "list_services", None)
+            servicios = listar() if listar else []
+            if servicios:
+                texto_servicios = ", ".join(servicios)
+                respuesta = (
+                    f"Claro, estos son los servicios que tenemos disponibles: {texto_servicios}. "
+                    "¿Te gustaría que te ayude a agendar una cita para alguno?"
+                )
+            else:
+                respuesta = (
+                    "Por ahora no tengo el catálogo de servicios a la mano — "
+                    "¿me cuentas qué tipo de atención necesitas?"
+                )
+            return BrainOutput(
+                senales_detectadas=["consulta_catalogo_servicios"],
+                respuesta_propuesta=respuesta,
                 proxima_accion_propuesta="preguntar_intencion",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
             )
@@ -245,7 +296,7 @@ class HealthBrain:
             return BrainOutput(
                 senales_detectadas=["gestion_para_beneficiario_declarada"],
                 respuesta_propuesta=(
-                    "Claro, ¿me confirmas el número de documento de identidad "
+                    "Con gusto te ayudo con eso — ¿me confirmas el número de documento de identidad "
                     "de la persona para quien es la cita?"
                 ),
                 proxima_accion_propuesta="preguntar_dato_faltante",
@@ -255,8 +306,15 @@ class HealthBrain:
         if _es_afirmativo(texto):
             return self._ofrecer_disponibilidad(datos)
 
+        # Redacción deliberadamente NO fija/memorizada (recado 027):
+        # esta es la respuesta que se repite cada vez que el paciente
+        # escribe algo que no reconocemos en esta etapa — sonaba
+        # robótica al repetirse literalmente turno tras turno en una
+        # conversación real. Sigue siendo la MISMA pregunta cerrada de
+        # sí/no (ninguna garantía ni guardrail cambia), solo con mejor
+        # redacción.
         return BrainOutput(
-            respuesta_propuesta="¿Te gustaría que te ayude a programar tu atención? Puedes responder sí o no.",
+            respuesta_propuesta="¿Te ayudo a agendar tu atención? Con que me digas sí o no, ya sé cómo seguir.",
             proxima_accion_propuesta="preguntar_intencion",
             propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
         )
@@ -284,14 +342,17 @@ class HealthBrain:
             # AHORA), sin que se haya escalado nada de verdad
             # (`necesidad_de_escalar` nunca se puso en True aquí).
             return BrainOutput(
-                respuesta_propuesta="Por ahora no tengo horarios disponibles para ese servicio. Escríbeme más tarde para revisar de nuevo.",
+                respuesta_propuesta=(
+                    "Lamento decirte que por ahora no tengo horarios disponibles para ese servicio. "
+                    "Escríbeme más tarde y lo revisamos de nuevo con gusto."
+                ),
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": {**datos, "etapa": "finalizada"}},
             )
         texto_opciones = "; ".join(
             f"{i+1}) {o.date} {o.time} en {o.location}" for i, o in enumerate(opciones)
         )
         return BrainOutput(
-            respuesta_propuesta=f"Perfecto, estas son las opciones disponibles: {texto_opciones}. ¿Cuál prefieres?",
+            respuesta_propuesta=f"¡Perfecto! Estas son las opciones disponibles: {texto_opciones}. ¿Cuál te queda mejor?",
             # "preguntar_dato_faltante" (no "ejecutar_tool"): todavía
             # falta la SELECCIÓN del paciente antes de poder reservar
             # — la tool que se ejecuta aquí es de lectura
@@ -313,8 +374,8 @@ class HealthBrain:
         if identidad is None:
             return BrainOutput(
                 respuesta_propuesta=(
-                    "No encontré ningún paciente registrado con ese documento. "
-                    "¿Puedes verificarlo y escribirlo de nuevo?"
+                    "No encontré ningún paciente registrado con ese documento — "
+                    "¿puedes revisarlo y escribírmelo de nuevo?"
                 ),
                 proxima_accion_propuesta="preguntar_dato_faltante",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
@@ -328,7 +389,7 @@ class HealthBrain:
         }
         return BrainOutput(
             senales_detectadas=["beneficiario_encontrado"],
-            respuesta_propuesta=f"Vamos a agendar para {nombre} — ¿es correcto?",
+            respuesta_propuesta=f"Perfecto, vamos a agendar para {nombre} — ¿es correcto?",
             proxima_accion_propuesta="preguntar_dato_faltante",
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
         )
@@ -343,7 +404,7 @@ class HealthBrain:
             nuevos = {**datos, "etapa": "esperando_documento_beneficiario"}
             return BrainOutput(
                 respuesta_propuesta=(
-                    "Entendido, ¿me confirmas el documento correcto de la "
+                    "Entendido, ¿me confirmas cuál es el documento correcto de la "
                     "persona para quien es la cita?"
                 ),
                 proxima_accion_propuesta="preguntar_dato_faltante",
@@ -369,7 +430,7 @@ class HealthBrain:
         elegida = self._elegir_opcion(texto, opciones)
         if elegida is None:
             return BrainOutput(
-                respuesta_propuesta="No identifiqué cuál prefieres — ¿me confirmas 1, 2 o 3?",
+                respuesta_propuesta="No logré identificar cuál prefieres — ¿me confirmas si es la 1, la 2 o la 3?",
                 proxima_accion_propuesta="preguntar_dato_faltante",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
             )
@@ -381,7 +442,7 @@ class HealthBrain:
         # defecto, requisito #5, sin cambios frente a antes de esta extensión).
         patient_reference_reserva = datos.get("beneficiario_documento") or self._activity.patient_reference
         return BrainOutput(
-            respuesta_propuesta="Perfecto, voy a reservarlo — un momento.",
+            respuesta_propuesta="¡Perfecto! Voy a reservarlo — dame un momento.",
             proxima_accion_propuesta="ejecutar_tool",
             tool_requerida={
                 "name": "book_appointment",
@@ -408,7 +469,10 @@ class HealthBrain:
             # (recado 026) — misma razón, nunca "te contactamos".
             return BrainOutput(
                 senales_detectadas=["reprogramacion_solicitada"],
-                respuesta_propuesta="Por ahora no tengo otros horarios disponibles para ese servicio. Escríbeme más tarde para revisar de nuevo.",
+                respuesta_propuesta=(
+                    "Lamento decirte que por ahora no tengo otros horarios disponibles para ese servicio. "
+                    "Escríbeme más tarde y lo revisamos de nuevo con gusto."
+                ),
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": {**datos, "etapa": "finalizada"}},
             )
         texto_opciones = "; ".join(
@@ -416,7 +480,7 @@ class HealthBrain:
         )
         return BrainOutput(
             senales_detectadas=["reprogramacion_solicitada"],
-            respuesta_propuesta=f"Claro, aquí tienes otras opciones: {texto_opciones}. ¿Cuál prefieres?",
+            respuesta_propuesta=f"Claro que sí, aquí tienes otras opciones: {texto_opciones}. ¿Cuál te queda mejor?",
             proxima_accion_propuesta="preguntar_dato_faltante",  # ver comentario equivalente arriba
             tool_requerida={"name": "get_availability", "params": {"service": servicio}},
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
@@ -427,13 +491,13 @@ class HealthBrain:
         elegida = self._elegir_opcion(texto, opciones)
         if elegida is None:
             return BrainOutput(
-                respuesta_propuesta="¿Me confirmas cuál opción prefieres: 1, 2 o 3?",
+                respuesta_propuesta="¿Me confirmas cuál opción prefieres — la 1, la 2 o la 3?",
                 proxima_accion_propuesta="preguntar_dato_faltante",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
             )
         nuevos = {**datos, "etapa": "reprogramando"}
         return BrainOutput(
-            respuesta_propuesta="Voy a reprogramar tu cita — un momento.",
+            respuesta_propuesta="Listo, voy a reprogramar tu cita — dame un momento.",
             proxima_accion_propuesta="ejecutar_tool",
             tool_requerida={
                 "name": "reschedule_appointment",
@@ -451,7 +515,7 @@ class HealthBrain:
         nuevos = {**datos, "etapa": "cancelando"}
         return BrainOutput(
             senales_detectadas=["cancelacion_solicitada"],
-            respuesta_propuesta="Entendido, voy a cancelar tu cita.",
+            respuesta_propuesta="Entendido, voy a cancelar tu cita ahora mismo.",
             proxima_accion_propuesta="ejecutar_tool",
             tool_requerida={
                 "name": "cancel_appointment",
@@ -475,8 +539,8 @@ class HealthBrain:
         return BrainOutput(
             senales_detectadas=["olvido_de_identidad_solicitado"],
             respuesta_propuesta=(
-                "¿Confirmas que quieres que olvide tu número? "
-                "Tendrás que verificarte de nuevo la próxima vez que escribas."
+                "Entendido — ¿confirmas que quieres que olvide tu número? "
+                "Ten en cuenta que vas a tener que verificarte de nuevo la próxima vez que escribas."
             ),
             proxima_accion_propuesta="preguntar_dato_faltante",
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
@@ -496,7 +560,7 @@ class HealthBrain:
             nuevos["etapa"] = etapa_anterior
             return BrainOutput(
                 senales_detectadas=["olvido_de_identidad_cancelado"],
-                respuesta_propuesta="Entendido, no voy a borrar nada. ¿En qué más te ayudo?",
+                respuesta_propuesta="Entendido, no voy a borrar nada — sigamos. ¿En qué más te ayudo?",
                 # "preguntar_dato_faltante" (no "preguntar_intencion"): la
                 # etapa restaurada puede venir de una fase_actual distinta
                 # de IDENTIFICACION_DE_INTENCION (ej. RECOPILACION_DE_DATOS,
