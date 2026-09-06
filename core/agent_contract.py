@@ -27,8 +27,6 @@ from core.orchestrator import Orchestrator
 from guardrails.base import Guardrail
 from guardrails.engine import GuardrailEngine
 from knowledge.base import KnowledgeSource
-from memory.conversation_memory import ConversationMemory
-from observability.events import EventLog
 from state.store import StateStore
 from tools.base import Tool
 from tools.registry import ToolRegistry
@@ -58,18 +56,9 @@ def build_orchestrator(definition: AgentDefinition) -> Orchestrator:
     for tool in definition.tools:
         registry.register(tool)
 
-    from guardrails.rules import (
-        ConsentimientoRequeridoParaWriteGuardrail,
-        NoPrometerContactoGuardrail,
-        SenalDeUrgenciaNoSePuedeBajarGuardrail,
-    )
+    from guardrails.rules import reglas_core_por_defecto
 
-    reglas_core = [
-        SenalDeUrgenciaNoSePuedeBajarGuardrail(),
-        ConsentimientoRequeridoParaWriteGuardrail(registry.categories_by_name()),
-        NoPrometerContactoGuardrail(),
-    ]
-    engine = GuardrailEngine(reglas_core + definition.extra_guardrails)
+    engine = GuardrailEngine(reglas_core_por_defecto(registry.categories_by_name()) + definition.extra_guardrails)
 
     from state.store import SQLiteStateStore
 
@@ -90,8 +79,40 @@ def build_orchestrator(definition: AgentDefinition) -> Orchestrator:
             "de desplegar cualquier canal en producción."
         )
     store: StateStore = SQLiteStateStore(db_path)
-    memory = ConversationMemory(window_size=definition.memory_window)
-    events = EventLog()
+
+    # Persistencia real de EventLog/ConversationMemory (recado 037,
+    # Parte 1, R-11) — mismo patrón exacto que ZANTIA_DB_PATH arriba
+    # (recado 021): sin la variable, cae a ":memory:" (SQLite en modo
+    # memoria, nunca objetos Python puros — mismo motor, mismo esquema,
+    # solo sin archivo en disco), pero NUNCA en silencio.
+    from memory.conversation_memory import SQLiteConversationMemory
+    from observability.events import SQLiteEventLog
+
+    events_db_path = DEFAULT_CONFIG.events_db_path
+    if events_db_path == ":memory:":
+        logger.warning(
+            "ZANTIA_EVENTS_DB_PATH no está configurada — el EventLog "
+            "(auditoría de transiciones, tools y decisiones de guardrail) "
+            "de esta conversación vive solo en memoria del proceso y se "
+            "pierde por completo si el proceso se reinicia a mitad de "
+            "camino. Sin esto, no hay forma de auditar qué decidió o "
+            "propuso el sistema tras un reinicio. Configurar "
+            "ZANTIA_EVENTS_DB_PATH (ver .env.example) antes de desplegar "
+            "cualquier canal en producción."
+        )
+    events = SQLiteEventLog(events_db_path)
+
+    memory_db_path = DEFAULT_CONFIG.memory_db_path
+    if memory_db_path == ":memory:":
+        logger.warning(
+            "ZANTIA_MEMORY_DB_PATH no está configurada — el historial "
+            "reciente de turnos (ConversationMemory) de esta conversación "
+            "vive solo en memoria del proceso y se pierde por completo si "
+            "el proceso se reinicia a mitad de camino. Configurar "
+            "ZANTIA_MEMORY_DB_PATH (ver .env.example) antes de desplegar "
+            "cualquier canal en producción."
+        )
+    memory = SQLiteConversationMemory(window_size=definition.memory_window, db_path=memory_db_path)
 
     return Orchestrator(
         state_store=store,

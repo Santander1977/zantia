@@ -84,7 +84,11 @@ def test_build_orchestrator_usa_zantia_db_path_y_sobrevive_a_reinicio(monkeypatc
         expected_version=recuperado.version,
     )
     r3 = proceso_2.handle_message(conv, "demo", _nuevo_id(), "mañana a las 10")
-    assert r3.state.fase_actual == FaseActual.RESPUESTA
+    # Recado 037, Parte 3: FakeBrain ahora exige una confirmación
+    # estructurada explícita (sí/no) antes de ejecutar la tool WRITE.
+    assert "confirmas" in r3.response.lower()
+    r4 = proceso_2.handle_message(conv, "demo", _nuevo_id(), "sí")
+    assert r4.state.fase_actual == FaseActual.RESPUESTA
     proceso_2.store.close()
 
 

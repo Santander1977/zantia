@@ -12,12 +12,14 @@ este MVP (ver docstring de la clase).
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from state.models import ConversationState
 from memory.conversation_memory import Turn
+from guardrails.base import VerificacionDeDatos
 
 # Lista de palabras clave de riesgo deliberadamente genérica (no médica)
 # para el demo del Core (prompt maestro, sección 27: no convertir el
@@ -26,8 +28,20 @@ from memory.conversation_memory import Turn
 # 004 sección 22) — esto NO es ese protocolo, es un placeholder de Core.
 RISK_KEYWORDS_DEMO = ("urgente", "emergencia", "ayuda inmediata", "muy grave")
 
+# "sí"/"si" como palabra completa (límite de palabra), sin exigir
+# tilde — reconocimiento mínimo, deliberadamente genérico (Core no
+# importa nada de domains/health/, aunque el criterio de "límite de
+# palabra, sin tilde" ya demostró ser necesario ahí — recado 030).
+_RE_CONFIRMACION_POSITIVA = re.compile(r"\bs[ií]\b", re.IGNORECASE)
+
+
+def _es_confirmacion_positiva(texto: str) -> bool:
+    return bool(_RE_CONFIRMACION_POSITIVA.search(texto))
+
 
 class BrainOutput(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     intencion: Optional[str] = None
     nivel_de_confianza: str = "MEDIO"  # BAJO | MEDIO | ALTO
     proxima_accion_propuesta: Optional[str] = None
@@ -35,6 +49,15 @@ class BrainOutput(BaseModel):
     tool_requerida: Optional[Dict[str, Any]] = None  # {"name": ..., "params": {...}}
     respuesta_propuesta: str = ""
     senales_detectadas: List[str] = Field(default_factory=list)
+    # --- Campos agregados en el recado 037 (preparación pre-LLM) ---
+    # Ver guardrails/rules.py: `verificaciones_de_datos` vacío es un
+    # ALLOW inmediato de DatoInventadoGuardrail (ningún Brain existente
+    # se rompe por no usarlo todavía); `confirmacion_estructurada_para_write`
+    # en False es IRRELEVANTE salvo que `tool_requerida` sea una tool
+    # WRITE — ahí SÍ bloquea por default (fail-safe deliberado: toda
+    # tool WRITE debe declarar confirmación explícita, nunca al revés).
+    verificaciones_de_datos: List[VerificacionDeDatos] = Field(default_factory=list)
+    confirmacion_estructurada_para_write: bool = False
 
 
 class Brain(Protocol):
@@ -85,6 +108,46 @@ class FakeBrain:
         if state.objetivo_de_conversacion == "programar_evento":
             faltan = state.datos_faltantes(["evento", "fecha"])
             nuevos_datos = dict(state.datos_recopilados)
+
+            # Confirmación estructurada explícita (recado 037, Parte 3)
+            # ANTES de proponer la tool WRITE — un turno adicional
+            # deliberado, deterministo (`_es_confirmacion_positiva`,
+            # límite de palabra "sí"/"si"), nunca la interpretación
+            # libre de un futuro LLM sobre si el usuario "pareció"
+            # confirmar. `ConfirmacionEstructuradaRequeridaParaWriteGuardrail`
+            # bloquearía "schedule_event" si se propusiera sin este paso.
+            if nuevos_datos.get("esperando_confirmacion_write"):
+                if _es_confirmacion_positiva(texto):
+                    nuevos_datos["esperando_confirmacion_write"] = False
+                    return BrainOutput(
+                        intencion="programar_evento",
+                        nivel_de_confianza="ALTO",
+                        proxima_accion_propuesta="ejecutar_tool",
+                        propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos_datos},
+                        tool_requerida={
+                            "name": "schedule_event",
+                            "params": {
+                                "evento": nuevos_datos.get("evento"),
+                                "fecha": nuevos_datos.get("fecha"),
+                                "idempotency_key": f"{state.conversation_id}:programar_evento",
+                            },
+                        },
+                        confirmacion_estructurada_para_write=True,
+                        respuesta_propuesta="Listo, lo programo.",
+                        senales_detectadas=senales,
+                    )
+                return BrainOutput(
+                    intencion="programar_evento",
+                    nivel_de_confianza="MEDIO",
+                    proxima_accion_propuesta="preguntar_dato_faltante",
+                    propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos_datos},
+                    respuesta_propuesta=(
+                        f"¿Confirmas que agendo '{nuevos_datos.get('evento')}' para "
+                        f"'{nuevos_datos.get('fecha')}'? Responde sí o no."
+                    ),
+                    senales_detectadas=senales,
+                )
+
             if "evento" in faltan and texto.strip():
                 nuevos_datos["evento"] = message.strip()
             elif "fecha" in faltan and texto.strip():
@@ -101,20 +164,16 @@ class FakeBrain:
                     senales_detectadas=senales,
                 )
 
+            nuevos_datos["esperando_confirmacion_write"] = True
             return BrainOutput(
                 intencion="programar_evento",
                 nivel_de_confianza="ALTO",
-                proxima_accion_propuesta="ejecutar_tool",
+                proxima_accion_propuesta="preguntar_dato_faltante",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos_datos},
-                tool_requerida={
-                    "name": "schedule_event",
-                    "params": {
-                        "evento": nuevos_datos.get("evento"),
-                        "fecha": nuevos_datos.get("fecha"),
-                        "idempotency_key": f"{state.conversation_id}:programar_evento",
-                    },
-                },
-                respuesta_propuesta="Listo, lo programo.",
+                respuesta_propuesta=(
+                    f"¿Confirmas que agendo '{nuevos_datos.get('evento')}' para "
+                    f"'{nuevos_datos.get('fecha')}'? Responde sí o no."
+                ),
                 senales_detectadas=senales,
             )
 

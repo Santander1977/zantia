@@ -23,9 +23,12 @@ def test_bloqueo_de_guardrail_queda_registrado(orchestrator):
     conv = f"conv-{_nuevo_id()}"
     orchestrator.handle_message(conv, "demo", _nuevo_id(), "quiero programar un evento")
     orchestrator.handle_message(conv, "demo", _nuevo_id(), "reunión")
-    # Sin otorgar consentimiento: al llegar el último dato, la tool WRITE
-    # debe bloquearse y quedar auditado.
     orchestrator.handle_message(conv, "demo", _nuevo_id(), "mañana")
+    # Recado 037: FakeBrain ahora pide confirmación estructurada antes
+    # de proponer la tool WRITE — hace falta un "sí" más para llegar al
+    # punto donde, sin consentimiento otorgado, debe bloquearse y
+    # quedar auditado.
+    orchestrator.handle_message(conv, "demo", _nuevo_id(), "sí")
 
     eventos = orchestrator.events.for_conversation(conv)
     decisiones = [e for e in eventos if e.type == EventType.GUARDRAIL_DECISION]

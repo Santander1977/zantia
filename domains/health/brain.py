@@ -758,6 +758,10 @@ class HealthBrain:
                     "idempotency_key": f"{self._activity.activity_id}:booking",
                 },
             },
+            # Recado 037, Parte 3: confirmación determinista ya ocurrió
+            # arriba (`_elegir_opcion` matcheó un ordinal real de una
+            # lista real) — nunca la interpretación libre de un LLM.
+            confirmacion_estructurada_para_write=True,
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
         )
 
@@ -881,6 +885,9 @@ class HealthBrain:
                     "idempotency_key": f"{self._activity.activity_id}:reschedule:{elegida}",
                 },
             },
+            # Recado 037, Parte 3: ordinal real matcheado arriba —
+            # confirmación determinista, nunca interpretación libre.
+            confirmacion_estructurada_para_write=True,
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
         )
 
@@ -895,6 +902,16 @@ class HealthBrain:
                 "name": "cancel_appointment",
                 "params": {"appointment_id": self._activity.appointment_id},
             },
+            # Recado 037, Parte 3: `_CANCELAR` ya exigió una frase
+            # imperativa exacta ("cancela mi cita", etc. — código
+            # determinista, nunca interpretación libre). Alcanzable
+            # SOLO con MockAppointmentService — el paciente real nunca
+            # llega aquí, siempre pasa por el sub-flujo real de código
+            # de verificación (gateway.py:_procesar_intento_de_codigo,
+            # fuera del Core/Orchestrator, ver recado 037). Documentado
+            # como diferencia deliberada frente al patrón "ordinal
+            # elegido" del resto de este archivo, no un descuido.
+            confirmacion_estructurada_para_write=True,
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
         )
 

@@ -36,11 +36,20 @@ def test_conversacion_normal_de_extremo_a_extremo(orchestrator):
 
     r3 = orchestrator.handle_message(conv, "demo", _nuevo_id(), "mañana a las 10")
     assert not r3.escalated
-    assert r3.state.fase_actual == FaseActual.RESPUESTA
     assert r3.state.datos_recopilados.get("fecha") == "mañana a las 10"
-    assert r3.state.resultado_de_herramientas.get("schedule_event", {}).get("confirmado") is True
-    assert len(r3.state.herramientas_utilizadas) == 1
-    assert r3.state.herramientas_utilizadas[0]["tool"] == "schedule_event"
+    # Recado 037, Parte 3: antes de ejecutar la tool WRITE, FakeBrain
+    # ahora exige una confirmación estructurada explícita (sí/no) —
+    # `ConfirmacionEstructuradaRequeridaParaWriteGuardrail` bloquearía
+    # "schedule_event" si se propusiera sin este paso.
+    assert "confirmas" in r3.response.lower()
+    assert r3.state.herramientas_utilizadas == []
+
+    r4 = orchestrator.handle_message(conv, "demo", _nuevo_id(), "sí")
+    assert not r4.escalated
+    assert r4.state.fase_actual == FaseActual.RESPUESTA
+    assert r4.state.resultado_de_herramientas.get("schedule_event", {}).get("confirmado") is True
+    assert len(r4.state.herramientas_utilizadas) == 1
+    assert r4.state.herramientas_utilizadas[0]["tool"] == "schedule_event"
 
     eventos_tool = [e for e in orchestrator.events.for_conversation(conv) if e.type.value == "TOOL_INVOKED"]
     assert len(eventos_tool) == 1

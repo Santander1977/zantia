@@ -19,15 +19,13 @@ from typing import Any, Dict, Optional
 
 from core.brain import Brain, RISK_KEYWORDS_DEMO
 from guardrails import (
-    ConsentimientoRequeridoParaWriteGuardrail,
     GuardrailContext,
     GuardrailDecision,
     GuardrailEngine,
-    NoPrometerContactoGuardrail,
-    SenalDeUrgenciaNoSePuedeBajarGuardrail,
+    reglas_core_por_defecto,
 )
-from memory.conversation_memory import ConversationMemory
-from observability.events import EventLog, EventType
+from memory.conversation_memory import ConversationMemoryProtocol
+from observability.events import EventLogProtocol, EventType
 from state.machine import InvalidTransitionError, is_terminal, validate_transition
 from state.models import ConversationState, FaseActual, Modo, NivelConfianza, NivelRiesgo, OrigenCambio
 from state.store import ConcurrencyConflictError, StateStore
@@ -73,10 +71,10 @@ class Orchestrator:
     def __init__(
         self,
         state_store: StateStore,
-        memory: ConversationMemory,
+        memory: ConversationMemoryProtocol,
         brain: Brain,
         tool_registry: ToolRegistry,
-        event_log: EventLog,
+        event_log: EventLogProtocol,
         guardrail_engine: Optional[GuardrailEngine] = None,
     ) -> None:
         self._store = state_store
@@ -85,11 +83,7 @@ class Orchestrator:
         self._tools = tool_registry
         self._events = event_log
         self._guardrails = guardrail_engine or GuardrailEngine(
-            [
-                SenalDeUrgenciaNoSePuedeBajarGuardrail(),
-                ConsentimientoRequeridoParaWriteGuardrail(tool_registry.categories_by_name()),
-                NoPrometerContactoGuardrail(),
-            ]
+            reglas_core_por_defecto(tool_registry.categories_by_name())
         )
         # Deduplicación de mensajes (004, sección 10). Simplificación de
         # MVP: vive en memoria de proceso, no en el StateStore — ver
@@ -102,7 +96,7 @@ class Orchestrator:
         return self._tools
 
     @property
-    def events(self) -> EventLog:
+    def events(self) -> EventLogProtocol:
         return self._events
 
     @property
@@ -136,12 +130,41 @@ class Orchestrator:
         if state.fase_actual == FaseActual.CIERRE:
             state = self._reabrir_ciclo(state)
 
-        brain_output = self._brain.interpret(text, state, self._memory.get_recent(conversation_id))
+        # Recado 037, Parte 4: la detección de riesgo se calcula ANTES
+        # de invocar al Brain, y NUNCA depende de que el Brain responda
+        # con éxito — un Brain basado en LLM real (network/API, todavía
+        # no conectado) puede fallar (timeout, error de red, JSON
+        # inválido) de formas que un Brain determinista por palabras
+        # clave nunca falla. Antes de este cambio, `detect_risk_keywords`
+        # se calculaba DESPUÉS de `self._brain.interpret(...)` — si el
+        # Brain hubiera lanzado una excepción, la detección de riesgo
+        # nunca se habría ejecutado, y un mensaje genuinamente urgente
+        # se habría perdido en un crash en vez de escalarse. Con el
+        # FakeBrain/HealthBrain deterministas de hoy esto nunca ocurría
+        # en la práctica (nunca lanzan), pero es exactamente el tipo de
+        # suposición implícita que hay que corregir ANTES de conectar
+        # un LLM real (ver docstring del módulo).
+        riesgo_detectado = detect_risk_keywords(text)
+
+        try:
+            brain_output = self._brain.interpret(text, state, self._memory.get_recent(conversation_id))
+        except Exception as exc:  # noqa: BLE001 — un Brain real puede fallar de formas no anticipadas
+            self._events.record(
+                conversation_id, EventType.ERROR,
+                detalle=f"Brain.interpret() lanzó una excepción: {exc}",
+            )
+            return self._escalar(
+                state, conversation_id, urgente=riesgo_detectado,
+                motivo=(
+                    "posible urgencia detectada (palabra clave) durante un fallo del Brain"
+                    if riesgo_detectado
+                    else f"error irrecuperable del Brain: {exc}"
+                ),
+            )
 
         cambios_propuestos: Dict[str, Any] = dict(brain_output.propuesta_de_actualizacion_de_estado)
 
         # --- Regla determinista de máxima prioridad: riesgo (sección 6/7) ---
-        riesgo_detectado = detect_risk_keywords(text)
         if riesgo_detectado:
             cambios_propuestos["senal_de_urgencia"] = True
             cambios_propuestos["nivel_de_riesgo"] = NivelRiesgo.ALTO
@@ -155,6 +178,9 @@ class Orchestrator:
             proposed_state_changes=cambios_propuestos,
             proposed_tool=tool_propuesta,
             proposed_response=brain_output.respuesta_propuesta,
+            mensaje_entrante=text,
+            verificaciones_de_datos=brain_output.verificaciones_de_datos,
+            confirmacion_estructurada_para_write=brain_output.confirmacion_estructurada_para_write,
         )
         veredicto = self._guardrails.evaluate(contexto_guardrail)
         self._events.record(
