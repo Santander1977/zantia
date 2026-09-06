@@ -135,7 +135,21 @@ class DatoInventadoGuardrail:
     verificación declarada (Brain determinista de hoy, que nunca
     inventa nada porque solo elige de listas reales), esta regla es un
     ALLOW inmediato — no bloquea nada por default, nunca un falso
-    positivo sobre un dominio que no la usa todavía."""
+    positivo sobre un dominio que no la usa todavía.
+
+    Comparación CASE-INSENSITIVE, decisión explícita del recado 041
+    (hallazgo real del recado 040): un LLM real varía mayúsculas/
+    minúsculas de un dato correcto por razones puramente gramaticales
+    (ej. un día de la semana en minúscula a mitad de oración), nunca
+    porque el dato en sí sea distinto — normalizar a minúscula ambos
+    lados de la comparación es la política general para esta regla
+    (no solo para "fecha"), en vez de agregar un flag opcional por
+    categoría. Si algún dominio futuro necesitara distinguir
+    mayúsculas/minúsculas como parte genuina del valor (ej. un código
+    alfanumérico donde el casing importa), seguirá funcionando en la
+    inmensa mayoría de los casos reales (dos códigos reales rara vez
+    difieren SOLO en mayúsculas) — y si eso cambia, se puede agregar
+    ese caso como una excepción explícita entonces, no antes."""
 
     name = "dato_inventado"
 
@@ -143,8 +157,8 @@ class DatoInventadoGuardrail:
         texto = context.proposed_response or ""
         for verificacion in context.verificaciones_de_datos:
             candidatos = re.findall(verificacion.patron, texto)
-            permitidos = set(verificacion.valores_permitidos)
-            invalidos = sorted({c for c in candidatos if c not in permitidos})
+            permitidos = {v.lower() for v in verificacion.valores_permitidos}
+            invalidos = sorted({c for c in candidatos if c.lower() not in permitidos})
             if invalidos:
                 return GuardrailResult(
                     decision=GuardrailDecision.BLOCK,

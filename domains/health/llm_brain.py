@@ -61,12 +61,26 @@ logger = logging.getLogger("zantia.health")
 # módulo verifica el TEXTO YA RENDERIZADO, no reconstruye fechas). Sin
 # grupos de captura (todos `(?:...)`) para que `re.findall` devuelva el
 # match completo en ambos casos.
+#
+# `(?i)` al inicio (recado 041, hallazgo real del recado 040): Claude
+# SIEMPRE escribe los días de la semana en minúscula dentro de una
+# oración ("el martes 8 de septiembre", nunca "el Martes...") — sin
+# esta bandera, el patrón nunca encontraba NINGUNA fecha en el texto
+# YA REDACTADO por el LLM (no porque la fecha fuera correcta: porque
+# nunca se reconocía como candidata a verificar), dejando
+# `DatoInventadoGuardrail` sin nada que comparar en la práctica. `(?i)`
+# viaja con el STRING del patrón (no solo con el objeto `re.Pattern`
+# compilado aquí) — por eso funciona igual cuando `DatoInventadoGuardrail`
+# vuelve a compilar `verificacion.patron` desde cero (`guardrails/rules.py`).
+# Ver también la normalización de la comparación en `DatoInventadoGuardrail`
+# — encontrar la fecha no basta, hay que compararla sin distinguir
+# mayúsculas/minúsculas también (recado 041).
 _RE_FECHA = re.compile(
-    r"\d{4}-\d{2}-\d{2}"
+    r"(?i)\d{4}-\d{2}-\d{2}"
     r"|(?:Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo) \d{1,2} de "
     r"(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)"
 )
-_RE_HORA = re.compile(r"\b\d{1,2}:\d{2}\b")
+_RE_HORA = re.compile(r"\b\d{1,2}:\d{2}\b")  # dígitos — sin ambigüedad de mayúsculas/minúsculas, sin cambios
 
 
 def _construir_verificaciones_de_datos(texto_base: str) -> List[VerificacionDeDatos]:
