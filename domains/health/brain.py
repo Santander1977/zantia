@@ -34,6 +34,18 @@ from .appointment_service import AppointmentService
 
 _ACEPTA = ("sí", "si,", " si ", "acepto", "me interesa", "claro que", "dale", "vale", "de acuerdo", "está bien")
 _DECLINA = ("no me interesa", "no gracias", "no quiero", "no estoy interesado", "no, gracias")
+# Respuesta de una sola palabra, mensaje COMPLETO (bug real de producción,
+# primera conversación real de un paciente por Telegram, recado 026): un
+# paciente que responde literalmente "Si"/"si" (sin tilde ni coma) a
+# "¿Te gustaría...? Puedes responder sí o no" no coincidía con NINGÚN
+# patrón de `_ACEPTA` — todos exigen tilde, coma o espacios alrededor,
+# precisamente para no confundirse con un "si" incrustado en otra palabra
+# ("asistir", "sinceramente"). Por eso esto se resuelve con una
+# comparación de IGUALDAD sobre el mensaje ya limpiado de puntuación de
+# borde, nunca con un substring adicional en `_ACEPTA`/`_DECLINA` (eso sí
+# reintroduciría el falso positivo que el diseño original evitaba).
+_ACEPTA_PALABRA_UNICA = ("si", "sí")
+_DECLINA_PALABRA_UNICA = ("no",)
 _HUMANO = ("hablar con alguien", "persona real", "un humano", "un asesor", "quiero hablar con")
 _NO_PUEDE_AHORA = ("no puedo ahora", "ahora no puedo", "en otro momento", "llámame después", "más tarde no")
 _PIDE_INFO = ("qué es", "más información", "cuéntame más", "por qué me contactan", "explícame", "de qué se trata")
@@ -71,6 +83,21 @@ _OLVIDAR = (
 
 def _contains_any(texto: str, opciones: tuple) -> bool:
     return any(o in texto for o in opciones)
+
+
+def _es_palabra_unica(texto: str, palabras: tuple) -> bool:
+    """Compara por IGUALDAD (no substring) el mensaje completo, ya sin
+    puntuación de borde (`"Si."`, `"¡si!"`) — ver comentario de
+    `_ACEPTA_PALABRA_UNICA` arriba."""
+    return texto.strip(" .!¡¿?,") in palabras
+
+
+def _es_afirmativo(texto: str) -> bool:
+    return _contains_any(texto, _ACEPTA) or _es_palabra_unica(texto, _ACEPTA_PALABRA_UNICA)
+
+
+def _es_negativo(texto: str) -> bool:
+    return _contains_any(texto, _DECLINA) or _es_palabra_unica(texto, _DECLINA_PALABRA_UNICA)
 
 
 class HealthBrain:
@@ -171,7 +198,7 @@ class HealthBrain:
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
             )
 
-        if _contains_any(texto, _DECLINA):
+        if _es_negativo(texto):
             nuevos = {**datos, "etapa": "finalizada", "decision": "DECLINED"}
             return BrainOutput(
                 senales_detectadas=["paciente_declina"],
@@ -225,7 +252,7 @@ class HealthBrain:
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
 
-        if _contains_any(texto, _ACEPTA):
+        if _es_afirmativo(texto):
             return self._ofrecer_disponibilidad(datos)
 
         return BrainOutput(
@@ -247,8 +274,17 @@ class HealthBrain:
             "opciones_ofrecidas": [o.slot_id for o in opciones],
         }
         if not opciones:
+            # NUNCA "te contactamos" (recado 026, hallazgo real de
+            # producción): esa frase está en `guardrails/rules.py:
+            # _PROMESAS_PROHIBIDAS` (lección de Dani, 002) y
+            # `NoPrometerContactoGuardrail` la reescribe en silencio por
+            # el mensaje genérico de escalamiento — el paciente termina
+            # leyendo "voy a registrar tu caso... no puedo garantizar
+            # contacto" en vez de la razón real (sin turnos disponibles
+            # AHORA), sin que se haya escalado nada de verdad
+            # (`necesidad_de_escalar` nunca se puso en True aquí).
             return BrainOutput(
-                respuesta_propuesta="Por ahora no tengo horarios disponibles, te contactamos pronto.",
+                respuesta_propuesta="Por ahora no tengo horarios disponibles para ese servicio. Escríbeme más tarde para revisar de nuevo.",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": {**datos, "etapa": "finalizada"}},
             )
         texto_opciones = "; ".join(
@@ -303,7 +339,7 @@ class HealthBrain:
         explícitamente... antes de continuar") — cualquier respuesta que
         no sea una aceptación clara vuelve a pedir el documento, nunca
         asume un "sí" implícito."""
-        if not _contains_any(texto, _ACEPTA):
+        if not _es_afirmativo(texto):
             nuevos = {**datos, "etapa": "esperando_documento_beneficiario"}
             return BrainOutput(
                 respuesta_propuesta=(
@@ -368,9 +404,11 @@ class HealthBrain:
             "opciones_reprogramacion": [o.slot_id for o in opciones],
         }
         if not opciones:
+            # Ver comentario equivalente en `_ofrecer_disponibilidad`
+            # (recado 026) — misma razón, nunca "te contactamos".
             return BrainOutput(
                 senales_detectadas=["reprogramacion_solicitada"],
-                respuesta_propuesta="Por ahora no tengo otros horarios disponibles, te contactamos pronto.",
+                respuesta_propuesta="Por ahora no tengo otros horarios disponibles para ese servicio. Escríbeme más tarde para revisar de nuevo.",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": {**datos, "etapa": "finalizada"}},
             )
         texto_opciones = "; ".join(
@@ -453,7 +491,7 @@ class HealthBrain:
         el paciente antes de pedir el olvido, para no perder su lugar
         en la conversación."""
         etapa_anterior = datos.get("etapa_antes_de_olvido", "esperando_decision")
-        if not _contains_any(texto, _ACEPTA):
+        if not _es_afirmativo(texto):
             nuevos = {k: v for k, v in datos.items() if k != "etapa_antes_de_olvido"}
             nuevos["etapa"] = etapa_anterior
             return BrainOutput(
