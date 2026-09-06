@@ -23,6 +23,26 @@ from typing import Dict, List, Optional
 
 from .hrmm_http import HttpClient
 
+# Normalización de tildes — ver comentario equivalente y más completo
+# en `domains/health/brain.py:_sin_tildes` (mismo criterio, capa
+# distinta, deliberadamente duplicado). Aplicada aquí (recado 031) al
+# ÚNICO punto real donde un nombre de servicio se traduce a
+# `servicio_id` para consultar disponibilidad real — protege por igual
+# a un servicio elegido por el paciente (`HealthBrain._interpretar_servicio`,
+# que ya normaliza tildes de su lado) y a `Activity.service` de una
+# campaña OUTBOUND, cuyo valor lo define el sistema fuente (la IPS) y
+# podría usar una convención de acentuación distinta a la del catálogo
+# real de hrmm-backend (confirmado 2026-09-06: el catálogo real NO usa
+# tildes — "Pediatria", "Odontologia", "Psicologia" — así que esta
+# normalización es hoy defensiva más que un bug ya reproducido contra
+# datos reales, pero cierra la clase completa de riesgo, no un caso
+# puntual).
+_MAPA_SIN_TILDES = str.maketrans("áéíóúÁÉÍÓÚ", "aeiouAEIOU")
+
+
+def _sin_tildes(texto: str) -> str:
+    return texto.translate(_MAPA_SIN_TILDES)
+
 
 class CatalogSyncError(Exception):
     pass
@@ -78,9 +98,9 @@ class CatalogMirror:
             self._medicos = nuevos_medicos
 
     def servicio_id_por_nombre(self, nombre: str) -> Optional[str]:
-        objetivo = nombre.strip().lower()
+        objetivo = _sin_tildes(nombre.strip().lower())
         for servicio in self._servicios.values():
-            if servicio.nombre.strip().lower() == objetivo:
+            if _sin_tildes(servicio.nombre.strip().lower()) == objetivo:
                 return servicio.servicio_id
         return None
 

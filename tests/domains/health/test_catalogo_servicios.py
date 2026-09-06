@@ -66,12 +66,21 @@ def test_pregunta_cual_tienes_tambien_lista_catalogo_real(gateway):
     assert "medicina general" in respuesta.lower()
 
 
-def test_catalogo_no_crea_ni_registra_una_conversacion_abierta(gateway):
-    """La pregunta de catálogo es una respuesta directa (como
-    CONSULTAR_CITA/ESCALAMIENTO) — no debe abrir una Activity de
-    reserva sintética con un servicio jamás confirmado por el paciente."""
+def test_catalogo_abre_conversacion_en_esperando_servicio_nunca_asume_uno(gateway):
+    """Revisado en el recado 031 (bug real corregido): antes esta
+    pregunta NO abría ninguna conversación rastreable — si el paciente
+    respondía justo después nombrando un servicio real, esa respuesta
+    se reprocesaba desde cero sin ningún contexto, y terminaba en el
+    fallback genérico de sí/no de HealthBrain (ver recado 031). Ahora sí
+    abre una Activity — pero SIN asumir ningún servicio (`service=None`)
+    y dejando la conversación en `esperando_servicio`, nunca en un
+    estado de reserva que salte directo a disponibilidad."""
     handle_inbound_message(gateway, "TG-CATALOGO-3", "telegram", "m1", "qué servicios tienen")
-    assert find_open_context(gateway, "TG-CATALOGO-3") is None
+    contexto = find_open_context(gateway, "TG-CATALOGO-3")
+    assert contexto is not None
+    assert contexto.activity.service is None
+    estado = contexto.orchestrator.store.get(contexto.activity.activity_id)
+    assert estado.datos_recopilados.get("etapa") == "esperando_servicio"
 
 
 def test_reformular_dentro_de_una_conversacion_ya_atascada_sale_del_mensaje_fijo(gateway, services):

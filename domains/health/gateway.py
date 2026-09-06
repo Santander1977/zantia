@@ -72,21 +72,56 @@ _MENSAJE_INFORMACION_GENERICA = (
 )
 
 
-def _mensaje_catalogo_real(gateway: "HealthGateway") -> str:
-    """Responde "qué servicios tienen" con el catálogo REAL ya
-    sincronizado (recado 027) — nunca inventado. `list_services()` es
-    duck-typed (mismo criterio que `buscar_paciente`), así que un
-    `AppointmentService` que no lo implemente, o un catálogo que todavía
-    no sincronizó (lista vacía), cae al mensaje genérico existente en
-    vez de mostrar una lista vacía o fallar."""
+def _resolver_consulta_catalogo(gateway: "HealthGateway", request: PatientRequest, channel: str) -> str:
+    """RequestIntent.INFORMACION_SERVICIO — responde "qué servicios
+    tienen" con el catálogo REAL ya sincronizado (recado 027), nunca
+    inventado. `list_services()` es duck-typed (mismo criterio que
+    `buscar_paciente`), así que un `AppointmentService` que no lo
+    implemente, o un catálogo que todavía no sincronizó (lista vacía),
+    cae al mensaje genérico existente.
+
+    Bug real corregido (recado 031): ANTES esta rama solo informaba el
+    catálogo sin abrir ninguna conversación — si el paciente respondía
+    justo después nombrando un servicio real, esa respuesta no tenía
+    NINGÚN estado "esperando_servicio" que la reconociera (`find_open_context`
+    devolvía `None`), así que se reprocesaba desde cero como un mensaje
+    nuevo sin relación, y terminaba cayendo al fallback genérico de
+    sí/no de `HealthBrain` — el paciente sentía que "responder bien" no
+    servía de nada. Ahora se abre una Activity sintética y se deja la
+    conversación en `esperando_servicio` (MISMO mecanismo que
+    `_resolver_programar_cita` usa cuando detecta más de un servicio
+    real, ver `_determinar_servicio_inicial`) — el paciente puede
+    nombrar el servicio a continuación y el flujo sigue con normalidad
+    hacia disponibilidad real."""
+    gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
     listar = getattr(gateway.appointment_service, "list_services", None)
     servicios = listar() if listar else []
     if not servicios:
         return _MENSAJE_INFORMACION_GENERICA
+
+    activity = _nueva_activity_sintetica(
+        _documento_resuelto(gateway, request.patient_reference), channel,
+        objective="Solicitud del paciente: consultar catálogo de servicios",
+        service=None,
+    )
+    activity = gateway.activity_source.create(activity)
+    context = build_health_agent_context(
+        activity, gateway.activity_source, gateway.appointment_service,
+        gateway.reminder_manager, gateway.result_sink,
+    )
+    _sembrar_conversacion_inbound(context)
+    register_context(gateway, request.patient_reference, context)
+
+    estado = context.orchestrator.store.get(context.activity.activity_id)
+    nuevos_datos = {**estado.datos_recopilados, "etapa": "esperando_servicio"}
+    context.orchestrator.store.save(
+        estado.model_copy(update={"datos_recopilados": nuevos_datos}), expected_version=estado.version
+    )
+
     texto_servicios = ", ".join(servicios)
     return (
         f"Estos son los servicios que tenemos disponibles: {texto_servicios}. "
-        "¿Te gustaría agendar una cita para alguno de ellos?"
+        "¿Para cuál te gustaría agendar?"
     )
 
 # Canales cuyo identificador (`patient_reference`) NO es un documento de
@@ -355,8 +390,7 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
         return _MENSAJE_ESCALAMIENTO_INBOUND
 
     if intent == RequestIntent.INFORMACION_SERVICIO:
-        gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
-        return _mensaje_catalogo_real(gateway)
+        return _resolver_consulta_catalogo(gateway, request, channel)
 
     if intent in (RequestIntent.REPROGRAMAR_CITA, RequestIntent.CANCELAR_CITA):
         return _resolver_gestion_de_cita_existente(gateway, request, channel, message_id, text)

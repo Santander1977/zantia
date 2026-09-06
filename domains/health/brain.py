@@ -306,10 +306,16 @@ class HealthBrain:
         # Pregunta por el catálogo de servicios, sin nombrar uno
         # específico (recado 027) — se responde con el catálogo REAL
         # (`AppointmentService.list_services()`, duck-typed, nunca
-        # inventado) y se queda en la MISMA etapa ("esperando_decision")
-        # para que el paciente pueda seguir la conversación con
-        # normalidad después (p. ej. decir "sí" para ver disponibilidad,
-        # o nombrar uno de los servicios listados).
+        # inventado). Transiciona a "esperando_servicio" (recado 031,
+        # bug real corregido: antes se quedaba en "esperando_decision"
+        # y una respuesta nombrando un servicio real, ej. "Medicina
+        # general", no coincidía con NINGÚN patrón de esa etapa —
+        # terminaba cayendo al fallback genérico de sí/no, como si el
+        # paciente no hubiera dicho nada útil) — así la respuesta
+        # siguiente se interpreta con `_interpretar_servicio`, el mismo
+        # mecanismo que ya usa `gateway.py:_resolver_programar_cita`.
+        # Sin catálogo disponible, no hay nada que desambiguar — se
+        # queda en la misma etapa, sin cambios.
         if _contains_any_sin_tildes(texto, _CONSULTAR_SERVICIOS):
             listar = getattr(self._appointment_service, "list_services", None)
             servicios = listar() if listar else []
@@ -317,18 +323,20 @@ class HealthBrain:
                 texto_servicios = ", ".join(servicios)
                 respuesta = (
                     f"Claro, estos son los servicios que tenemos disponibles: {texto_servicios}. "
-                    "¿Te gustaría que te ayude a agendar una cita para alguno?"
+                    "¿Para cuál te gustaría agendar?"
                 )
+                nuevos = {**datos, "etapa": "esperando_servicio"}
             else:
                 respuesta = (
                     "Por ahora no tengo el catálogo de servicios a la mano — "
                     "¿me cuentas qué tipo de atención necesitas?"
                 )
+                nuevos = datos
             return BrainOutput(
                 senales_detectadas=["consulta_catalogo_servicios"],
                 respuesta_propuesta=respuesta,
-                proxima_accion_propuesta="preguntar_intencion",
-                propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+                proxima_accion_propuesta="preguntar_dato_faltante",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
 
         # Gestión para un beneficiario (recado 013) — solo si el
