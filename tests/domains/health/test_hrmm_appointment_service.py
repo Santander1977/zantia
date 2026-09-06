@@ -280,3 +280,24 @@ def test_get_availability_contra_hrmm_backend_real():
     slots = service_real.get_availability(servicio_real)
     for slot in slots:
         assert slot.slot_id and slot.date and slot.time
+
+
+def test_mapear_estado_con_vocabulario_real_confirmado():
+    """Recado 032 — vocabulario real de `Cita.estado` confirmado con una
+    llamada real de solo lectura contra hrmm-backend (documento con
+    historial real variado): "agendada", "atendida", "cancelada",
+    "reprogramada", "no_show". Cierra R-9 (antes "reservada"/
+    "confirmada"/"no_asistio" eran inferencia, no confirmación —
+    resultaron ser incorrectas para el estado de una reserva recién
+    creada, causa raíz directa del bug del recado 032)."""
+    from domains.health.hrmm_appointment_service import _mapear_estado
+    from domains.health.models import AppointmentStatus
+
+    assert _mapear_estado("agendada") == AppointmentStatus.CONFIRMED
+    assert _mapear_estado("atendida") == AppointmentStatus.ATTENDED
+    assert _mapear_estado("cancelada") == AppointmentStatus.CANCELLED
+    assert _mapear_estado("reprogramada") == AppointmentStatus.RESCHEDULED
+    assert _mapear_estado("no_show") == AppointmentStatus.NO_SHOW
+    # Valores no contemplados nunca se inventan como algo distinto de
+    # REQUESTED (comportamiento conservador, sin cambios).
+    assert _mapear_estado("algo-nuevo-no-visto") == AppointmentStatus.REQUESTED

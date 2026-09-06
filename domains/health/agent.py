@@ -170,7 +170,7 @@ def handle_patient_message(context: HealthAgentContext, message_id: str, text: s
     context.activity = _sincronizar_activity(context, resultado)
     context.activity_source.update(context.activity)
 
-    just_booked = etapa_actual == "reservando" and _tool_exitosa(resultados_tools, "book_appointment", "CONFIRMED")
+    just_booked = etapa_actual == "reservando" and _book_appointment_exitoso(resultados_tools)
     just_rescheduled = etapa_actual == "reprogramando" and _tool_exitosa(
         resultados_tools, "reschedule_appointment", "RESCHEDULED"
     )
@@ -222,6 +222,39 @@ def handle_patient_message(context: HealthAgentContext, message_id: str, text: s
 def _tool_exitosa(resultados_tools: dict, nombre_tool: str, status_esperado: str) -> bool:
     datos = resultados_tools.get(nombre_tool)
     return bool(datos) and datos.get("status") == status_esperado
+
+
+def _book_appointment_exitoso(resultados_tools: dict) -> bool:
+    """Recado 032, bug real de producción: la reserva se completaba de
+    verdad contra hrmm-backend (POST /api/agenda/citas exitoso, sin
+    excepción) pero el paciente nunca se enteraba — `_tool_exitosa`
+    exigía `status == "CONFIRMED"` literal, y ese mapeo
+    (`hrmm_appointment_service.py:_MAPA_ESTADO_HRMM`) sigue siendo
+    INFERENCIA nunca confirmada contra una `Cita` real (riesgo R-9,
+    abierto desde el recado 009 — a diferencia de
+    `BloqueDisponibilidad.estado`, que sí se validó con datos reales).
+    Si el `estado` real de una cita recién creada no está en ese mapa,
+    cae al default `AppointmentStatus.REQUESTED` — y la reserva
+    exitosa quedaba invisible: sin texto de confirmación, sin
+    `management_status` actualizado, sin recordatorios programados, sin
+    cerrar la Activity — el paciente veía "voy a reservarlo" para
+    siempre, y cualquier mensaje siguiente reabría el ciclo desde cero
+    (perdiendo el resultado ya logrado) e intentaba reservar de nuevo.
+
+    `BookAppointmentTool.run()` (tools.py) YA es la autoridad real de
+    éxito/fracaso de la escritura — solo devuelve `data` no vacío
+    cuando `book_appointment()` Y `confirm_appointment()` respondieron
+    sin excepción (`ToolResult.data` es `None` en cualquier falla, ver
+    `tools/base.py`). Exigir además una palabra de estado específica,
+    cuyo vocabulario real nunca se confirmó, es una segunda verificación
+    redundante y frágil — se retira SOLO para book_appointment (no para
+    "cancel_appointment"/"reschedule_appointment": esos flujos con
+    HrmmAppointmentService real pasan por el sub-flujo de verificación
+    de `gateway.py`, no por aquí — ver docstring de
+    `hrmm_appointment_service.py` — así que no exhiben este mismo bug
+    reportado; tocarlos igual sería ampliar el alcance sin un caso real
+    que lo justifique, ver recado 032)."""
+    return bool(resultados_tools.get("book_appointment"))
 
 
 def _normalizar_tras_turno(context: HealthAgentContext, etapa_actual, resultados_tools: dict) -> None:
@@ -288,7 +321,7 @@ def _sincronizar_activity(context: HealthAgentContext, resultado: OrchestratorRe
         # APPOINTMENT_CONFIRMED (sigue con cita vigente, ya reconfirmada).
         return _touch(activity, management_status=ManagementStatus.APPOINTMENT_CONFIRMED)
 
-    if etapa == "reservando" and _tool_exitosa(resultados_tools, "book_appointment", "CONFIRMED"):
+    if etapa == "reservando" and _book_appointment_exitoso(resultados_tools):
         appointment_id = resultados_tools["book_appointment"].get("appointment_id")
         return _touch(
             activity, management_status=ManagementStatus.APPOINTMENT_CONFIRMED, appointment_id=appointment_id

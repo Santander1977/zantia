@@ -42,14 +42,30 @@ from .models import Appointment, AppointmentStatus, AvailabilitySlot
 # devuelve este campo) exige `X-Backend-Secret` — no se llamó en esta
 # sesión (2026-09-01) por decisión explícita del usuario de no usar el
 # secreto de escritura. Confirmado por HTTP real: sin secreto responde
-# 401 "No autorizado." (ver recado 010). Mapeo best-effort de los
-# valores en español más probables a AppointmentStatus, sin confirmar.
+# 401 "No autorizado." (ver recado 010).
+#
+# Vocabulario real CONFIRMADO (recado 032, 2026-09-06) — llamada real,
+# de solo lectura, a `GET /api/agenda/citas?documento_paciente=...`
+# para un documento real con historial variado: los 5 valores reales
+# observados fueron "agendada", "atendida", "cancelada", "reprogramada",
+# "no_show". Esto CIERRA `R-9` (antes "INFERENCIA no confirmada" —
+# "reservada"/"confirmada"/"no_asistio" eran adivinanzas razonables que
+# resultaron ser INCORRECTAS: una cita recién creada llega en
+# "agendada", no "reservada"/"confirmada" — y "no_show" no
+# "no_asistio"/"no_asistió"). Causa raíz directa del bug del recado 032
+# (la reserva se completaba de verdad pero nunca se reportaba como
+# exitosa: "agendada" no estaba en este mapa, caía al default
+# `REQUESTED`). Los valores viejos se mantienen como alias adicionales
+# (no hacen daño, por si alguna variante interna de hrmm-backend
+# todavía los usa en otro contexto no visto en esta muestra).
 _MAPA_ESTADO_HRMM: Dict[str, AppointmentStatus] = {
+    "agendada": AppointmentStatus.CONFIRMED,
     "reservada": AppointmentStatus.CONFIRMED,
     "confirmada": AppointmentStatus.CONFIRMED,
     "reprogramada": AppointmentStatus.RESCHEDULED,
     "cancelada": AppointmentStatus.CANCELLED,
     "atendida": AppointmentStatus.ATTENDED,
+    "no_show": AppointmentStatus.NO_SHOW,
     "no_asistio": AppointmentStatus.NO_SHOW,
     "no_asistió": AppointmentStatus.NO_SHOW,
 }
