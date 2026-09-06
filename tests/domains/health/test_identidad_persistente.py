@@ -124,6 +124,26 @@ def test_build_identity_store_usa_env_var_o_cae_a_memoria(monkeypatch, tmp_path)
     assert reabierto.get(_TELEFONO).estado == EstadoIdentidadCanal.VERIFICADO
 
 
+def test_sqlite_identidad_canal_store_crea_el_directorio_padre_si_falta(tmp_path):
+    """Recado 029 (preparación para un volumen persistente real en
+    EasyPanel): mismo criterio que `state/store.py:SQLiteStateStore`
+    (recado 021, R-22) — `sqlite3.connect` NO crea directorios
+    intermedios por sí solo. Sin este `mkdir`, apuntar
+    `ZANTIA_IDENTIDAD_DB_PATH` a una carpeta que todavía no existe
+    (ej. un subdirectorio dentro del volumen recién montado) revienta
+    con un error críptico en el primer arranque real."""
+    ruta = tmp_path / "carpeta_nueva" / "identidad.db"
+    assert not ruta.parent.exists()
+
+    store = SQLiteIdentidadCanalStore(str(ruta))
+    try:
+        assert ruta.parent.is_dir()
+        store.marcar_verificado(_TELEFONO, _DOCUMENTO_VALIDO)
+        assert ruta.exists()
+    finally:
+        store.close()
+
+
 # ---------------------------------------------------------------------
 # Hidratación en handle_inbound_message (requisito #3 del pedido).
 # ---------------------------------------------------------------------

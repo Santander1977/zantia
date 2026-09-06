@@ -14,15 +14,20 @@ de cualquier `ConversationState`/Activity puntual.
 
 Deliberadamente en un store PROPIO, no reutilizando `state/store.py`:
 cada `HealthAgentContext` (uno por Activity/conversación,
-`domains/health/agent.py:build_health_agent_context`) construye, vía
-`core/agent_contract.py:build_orchestrator`, su PROPIO
-`SQLiteStateStore(":memory:")` — nace y muere con esa conversación
-puntual, sin conectar `ZANTIA_DB_PATH` (brecha de wiring preexistente,
-no resuelta aquí — ver `.ai/RISKS.md`). Un dato que debe sobrevivir a
-todas las conversaciones de un mismo teléfono, incluyendo reinicios del
-proceso, necesita vivir a un nivel distinto: `HealthGateway` (compartido
-por todo el proceso, ver `service/app.py`), respaldado por su propio
-archivo/tabla SQLite.
+`domains/health/agent.py:build_health_agent_context`) tiene su propio
+ciclo de vida ligado a esa conversación puntual — nace y muere con
+ella. Un dato que debe sobrevivir a TODAS las conversaciones de un
+mismo teléfono, incluyendo reinicios del proceso, necesita vivir a un
+nivel distinto: `HealthGateway` (compartido por todo el proceso, ver
+`service/app.py`), respaldado por su propio archivo/tabla SQLite.
+(Nota de corrección, recado 029: este párrafo decía que
+`core/agent_contract.py:build_orchestrator` no conectaba
+`ZANTIA_DB_PATH` — eso era cierto cuando se escribió, pero quedó
+RESUELTO en el recado 021/R-22; `build_orchestrator` ya lee
+`ZANTIA_DB_PATH` de verdad. La separación de stores entre este archivo
+y `state/store.py` se sostiene por la razón de ciclo de vida/clave
+primaria de arriba, no por esa brecha ya cerrada — ver recado 021 para
+el detalle completo de esa decisión.)
 
 Retención (recado 016, extensión de R-20 — decisiones de producto YA
 TOMADAS por el usuario, 2026-09-03, resolviendo lo que el recado 014
@@ -51,6 +56,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Optional, Protocol
 
 # Ventana de retención de una identidad VERIFICADA (recado 016, requisito
@@ -127,6 +133,15 @@ class SQLiteIdentidadCanalStore:
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self._db_path = db_path
+        if db_path != ":memory:":
+            # Mismo criterio que `state/store.py:SQLiteStateStore`
+            # (recado 021, R-22): `sqlite3.connect` NO crea directorios
+            # intermedios — sin esto, apuntar `ZANTIA_IDENTIDAD_DB_PATH`
+            # a una carpeta nueva (ej. un volumen recién montado en
+            # EasyPanel) revienta con un error críptico en el primer
+            # arranque real, en vez de crear el archivo sin más (recado
+            # 029, preparación para volumen persistente).
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._lock = threading.Lock()
         self._init_schema()
