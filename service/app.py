@@ -192,6 +192,24 @@ async def webhook_telegram(request: Request):
     una petición sin el secreto correcto no debe poder disparar NINGÚN
     procesamiento, ni de forma o de contenido."""
     secreto_recibido = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+
+    # --- LOG TEMPORAL DE DIAGNÓSTICO (recado en curso, 2026-09-05) ---
+    # Nunca imprime el valor real de ningún secreto, solo presencia/longitud
+    # — para diagnosticar un 401 persistente pese a que ambos valores
+    # midan lo mismo. QUITAR una vez resuelto (no es una verificación de
+    # seguridad real, es un log puntual para esta investigación).
+    import os as _os_diag
+    _secreto_esperado_diag = _os_diag.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    logger.warning(
+        "DIAGNOSTICO TELEGRAM: header_presente=%s longitud_recibida=%s longitud_esperada=%s "
+        "todos_los_headers=%s",
+        secreto_recibido is not None,
+        len(secreto_recibido) if secreto_recibido else 0,
+        len(_secreto_esperado_diag) if _secreto_esperado_diag else 0,
+        list(request.headers.keys()),
+    )
+    # --- FIN LOG TEMPORAL ---
+
     try:
         secreto_valido = _canal_telegram.verificar_secreto_webhook(secreto_recibido)
     except TelegramChannelError as exc:
