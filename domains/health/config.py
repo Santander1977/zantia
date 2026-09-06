@@ -22,13 +22,20 @@ Ver `.env.example` para los nombres documentados (nunca valores).
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+from typing import Any, Callable
+
+from core.brain import Brain
 
 from .appointment_service import AppointmentService, MockAppointmentService
+from .brain import HealthBrain
 from .hrmm_appointment_service import HrmmAppointmentService
 from .hrmm_catalog import CatalogMirror
 from .hrmm_http import HttpClient, RealHttpClient
+
+logger = logging.getLogger("zantia.health")
 
 
 class HealthConfigError(Exception):
@@ -98,4 +105,75 @@ def build_appointment_service(
     raise HealthConfigError(
         f"{config.env_var}={entorno!r} no es un valor reconocido — usar 'mock', "
         "'staging' o 'production'."
+    )
+
+
+@dataclass(frozen=True)
+class HealthBrainConfig:
+    """Recado 038 — mismo patrón que `HealthServiceConfig` arriba,
+    aplicado a la elección de Brain: `build_health_brain()` es el ÚNICO
+    punto que lee `HEALTH_BRAIN_TYPE` — ningún otro archivo decide por
+    su cuenta cuál Brain construir."""
+
+    env_var: str = "HEALTH_BRAIN_TYPE"
+    anthropic_api_key_env_var: str = "ANTHROPIC_API_KEY"
+    anthropic_model: str = "claude-sonnet-5"
+
+
+DEFAULT_HEALTH_BRAIN_CONFIG = HealthBrainConfig()
+
+
+def build_health_brain(
+    activity_provider: Callable[[], Any],
+    appointment_service: AppointmentService,
+    config: HealthBrainConfig = DEFAULT_HEALTH_BRAIN_CONFIG,
+) -> Brain:
+    """Único punto de composición para el Brain del dominio salud
+    (recado 038). Valores válidos de `HEALTH_BRAIN_TYPE`:
+
+    - (no definida) o `deterministico` -> `HealthBrain` — default
+      SEGURO, sin cambios de comportamiento frente a antes de este
+      recado.
+    - `llm` -> `HealthAnthropicBrain` (recado 038: interpreta con el
+      MISMO `HealthBrain` determinista de siempre, redacta el texto
+      final con Anthropic real) — requiere `ANTHROPIC_API_KEY`
+      configurada. Si falta, **nunca falla al arrancar ni a mitad de
+      una conversación**: cae al `HealthBrain` determinista con un
+      `logger.warning` explícito (mismo criterio de "nunca en
+      silencio" que el resto del proyecto, recado 021/037) — a
+      diferencia de `HRMM_BACKEND_ENV=production` (que si falla,
+      *sí* debe fallar fuerte, porque ahí la alternativa segura no
+      existe), acá SÍ existe una alternativa segura y funcional
+      (el Brain determinista), así que degradar es la decisión
+      correcta, no un descuido.
+
+    El default de `HEALTH_BRAIN_TYPE` es SIEMPRE `deterministico` —
+    nunca se activa `llm` automáticamente en ningún archivo de
+    configuración de este repo (`.env.example` documenta la variable
+    con el valor vacío)."""
+    brain_determinista = HealthBrain(activity_provider, appointment_service)
+    tipo = os.environ.get(config.env_var, "deterministico").strip().lower()
+
+    if tipo in ("", "deterministico", "determinista"):
+        return brain_determinista
+
+    if tipo == "llm":
+        api_key = os.environ.get(config.anthropic_api_key_env_var)
+        if not api_key:
+            logger.warning(
+                f"{config.env_var}=llm pero {config.anthropic_api_key_env_var} no está "
+                "configurada — cayendo al Brain determinista (HealthBrain). Configurar "
+                f"{config.anthropic_api_key_env_var} (ver .env.example) para usar el Brain "
+                "basado en LLM real."
+            )
+            return brain_determinista
+        from .llm_brain import AnthropicResponseDrafter, HealthAnthropicBrain
+
+        drafter = AnthropicResponseDrafter(
+            model=config.anthropic_model, api_key_env_var=config.anthropic_api_key_env_var
+        )
+        return HealthAnthropicBrain(brain_determinista, drafter)
+
+    raise HealthConfigError(
+        f"{config.env_var}={tipo!r} no es un valor reconocido — usar 'deterministico' o 'llm'."
     )

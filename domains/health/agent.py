@@ -24,7 +24,7 @@ from state.models import FaseActual
 
 from .activity_source import ActivitySource
 from .appointment_service import AppointmentService
-from .brain import HealthBrain
+from .config import build_health_brain
 from .models import Activity, ActivityStatus, ManagementStatus
 from .reminder_manager import ReminderManager
 from .result_sink import ActivityResultSink
@@ -80,7 +80,12 @@ def build_health_agent_context(
     definition = AgentDefinition(
         name=f"health-{activity.activity_id}",
         domain="health",
-        brain=HealthBrain(lambda: context.activity, appointment_service),
+        # Recado 038: `build_health_brain()` es el ÚNICO punto que
+        # decide entre `HealthBrain` determinista (default seguro) y
+        # `HealthAnthropicBrain` (HEALTH_BRAIN_TYPE=llm) — nunca se
+        # decide aquí directamente, mismo criterio que
+        # `build_appointment_service()`.
+        brain=build_health_brain(lambda: context.activity, appointment_service),
         tools=tools,
         memory_window=12,
     )
