@@ -66,12 +66,17 @@ _MENSAJE_INFORMACION_GENERICA = (
 )
 
 # Canales cuyo identificador (`patient_reference`) NO es un documento de
-# identidad (recado 012, R-15) — hoy solo ChatwootChannel (número de
-# WhatsApp, ver `channels/chatwoot_channel.py:ChatwootChannel.canal`).
-# Deliberadamente explícito (allowlist), no inferido del nombre del
-# canal, para no gatear por accidente un canal futuro que sí entregue
-# el documento directamente.
-_CANALES_SIN_IDENTIFICADOR_DOCUMENTO = {"chatwoot"}
+# identidad (recado 012, R-15) — ChatwootChannel (número de WhatsApp) y,
+# desde recado 022, TelegramChannel (chat.id de Telegram — ver
+# `channels/telegram_channel.py:TelegramChannel.canal`), tampoco un
+# documento. Deliberadamente explícito (allowlist), no inferido del
+# nombre del canal, para no gatear por accidente un canal futuro que sí
+# entregue el documento directamente. Requisito #3 del pedido de
+# recado 022: un usuario de Telegram nuevo pasa por el MISMO wizard de
+# identificación de 012/014/016 (documento -> código -> identidad_canal,
+# con vencimiento a 180 días y olvido a pedido) — cero código nuevo
+# hizo falta para esto, solo agregar "telegram" acá.
+_CANALES_SIN_IDENTIFICADOR_DOCUMENTO = {"chatwoot", "telegram"}
 
 
 @dataclass

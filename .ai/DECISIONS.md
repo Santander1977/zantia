@@ -12,3 +12,5 @@ Estados posibles: `PROPUESTA` → `PENDIENTE DE APROBACIÓN` → `APROBADA` → 
 | D-4 | HrmmAppointmentService: identidad por documento, verificación por código obligatoria fuera de HealthBrain | IMPLEMENTADA | `docs/decisions/d-4-adaptador-real-hrmm-backend.md` |
 | D-5 | Empaquetado como servicio HTTP con FastAPI+uvicorn (transporte, no lógica) + canal real ChatwootChannel | IMPLEMENTADA | `docs/decisions/d-5-empaquetado-fastapi-chatwoot.md` |
 | D-6 | Identidad de canal persistente entre conversaciones: store SQLite propio (`identity_store.py`), separado de `ConversationState`, con verificación por código antes de persistir | IMPLEMENTADA (bloqueada para producción real por R-19) | `docs/decisions/d-6-identidad-canal-persistente.md` |
+| D-7 | TelegramChannel recibe mensajes por webhook (no polling) — mismo transporte HTTP ya usado para ChatwootChannel (D-5) | IMPLEMENTADA | `docs/decisions/d-7-telegram-webhook-vs-polling.md` |
+| D-8 | Chatwoot pasa a ser OPCIONAL al arrancar `service/app.py` — un despliegue que solo use Telegram no depende de él | IMPLEMENTADA | `docs/decisions/d-8-chatwoot-opcional.md` |

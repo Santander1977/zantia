@@ -38,4 +38,8 @@
 - [ ] Decidir persistencia real para `ConversationMemory`/`EventLog` (hoy en memoria de proceso) si el despliegue tendrá reinicios o múltiples instancias (R-11).
 - [ ] Configurar `ANTHROPIC_API_KEY` y validar `AnthropicBrain` en vivo, si se requiere NLU real más allá de las reglas deterministas actuales (R-13).
 
-**Variables de entorno a completar en el entorno de destino** (ver `.env.example`, nunca con valores en este repo): `ANTHROPIC_API_KEY`, `ZANTIA_DB_PATH`, `HRMM_BACKEND_ENV`, `HRMM_BACKEND_URL`, `HRMM_BACKEND_SECRET`, `CHATWOOT_URL`, `CHATWOOT_ACCOUNT_ID`, `CHATWOOT_API_TOKEN`.
+**Variables de entorno a completar en el entorno de destino** (ver `.env.example`, nunca con valores en este repo): `ANTHROPIC_API_KEY`, `ZANTIA_DB_PATH`, `ZANTIA_IDENTIDAD_DB_PATH`, `HRMM_BACKEND_ENV`, `HRMM_BACKEND_URL`, `HRMM_BACKEND_SECRET`.
+
+**Chatwoot — OPCIONAL desde recado 024 (decisión D-8)**: `CHATWOOT_URL`, `CHATWOOT_ACCOUNT_ID`, `CHATWOOT_API_TOKEN`. Un despliegue que no vaya a usar Chatwoot puede omitirlas — el proceso arranca igual, `POST /webhook/chatwoot` responde `503` explícito si se invoca sin configurar.
+
+**Telegram — `TELEGRAM_BOT_TOKEN` opcional (perezosa, solo se necesita para responder), `TELEGRAM_WEBHOOK_SECRET` OBLIGATORIA si se va a usar este canal** (recados 022/023): sin `TELEGRAM_WEBHOOK_SECRET`, el proceso NO arranca (fail-fast) — a diferencia de Chatwoot, este canal siempre necesita poder validar el origen del webhook, nunca queda expuesto sin esa verificación.

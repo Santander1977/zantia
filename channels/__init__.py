@@ -1,6 +1,7 @@
 from .chatwoot_channel import ChatwootChannel, ChatwootChannelError
 from .contract import Channel, InboundMessage, OutboundMessage
 from .mock_channel import MockChannel
+from .telegram_channel import TelegramChannel, TelegramChannelError
 
 __all__ = [
     "Channel",
@@ -9,4 +10,6 @@ __all__ = [
     "MockChannel",
     "ChatwootChannel",
     "ChatwootChannelError",
+    "TelegramChannel",
+    "TelegramChannelError",
 ]
