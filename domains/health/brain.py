@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from difflib import SequenceMatcher
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.brain import BrainOutput
 from memory.conversation_memory import Turn
@@ -200,6 +201,16 @@ _VARIANTES_FECHA_NO_IDENTIFICADA = (
     "No logré identificar cuál fecha prefieres — ¿me confirmas si es la 1, la 2 o la 3?",
     "Perdona, no reconocí cuál de esas fechas elegiste — ¿me dices si es la 1, la 2 o la 3?",
 )
+# Ambigüedad genuina de servicio (recado 036) — el paciente escribió
+# algo que se parece razonablemente a MÁS DE UN servicio real (ej.
+# "pequiatria" entre "pediatria" y "psiquiatria"): nunca se elige por
+# el paciente, se le muestran solo los candidatos cercanos encontrados
+# (no el catálogo completo de nuevo, para reconocer que sí escribió
+# algo reconocible).
+_VARIANTES_SERVICIO_AMBIGUO = (
+    "Creo que podrías referirte a más de uno de estos: {opciones}. ¿Cuál de los dos es el que necesitas?",
+    "No quiero adivinar entre estos: {opciones}. ¿Me confirmas cuál de los dos prefieres?",
+)
 
 # Nombres en español para formatear una fecha real ("2026-09-07") de
 # forma legible ("Lunes 7 de septiembre") — recado 035, Paso 2 del
@@ -225,6 +236,77 @@ def _formatear_fecha_humana(fecha_iso: str) -> str:
     except ValueError:
         return fecha_iso
     return f"{_DIAS_SEMANA[fecha.weekday()]} {fecha.day} de {_MESES[fecha.month - 1]}"
+
+
+# Tolerancia a errores de tipeo al elegir un servicio por nombre libre
+# (recado 036, pedido explícito del usuario): un paciente real escribe
+# "pedeatria", "pediatra", "medisina general", "sicologia" — ninguno
+# calza como substring exacto contra el catálogo real, aunque la
+# intención sea clara para un humano. Se usa `difflib.SequenceMatcher`
+# (librería estándar, sin dependencia nueva — decisión explícita:
+# `rapidfuzz` no está instalado en este proyecto, y el pedido permitía
+# cualquiera de las dos) en vez de reglas manuales nuevas, que solo
+# cubrirían los typos ya vistos y no generalizarían a otros.
+#
+# UMBRAL elegido: 0.82 (82%) — calibrado con ejemplos reales de esta
+# sesión (ver recado 036 para la tabla completa de puntajes): todos los
+# typos reales pedidos puntúan >= 0.889 contra su servicio real
+# correspondiente, con el siguiente candidato más cercano por debajo de
+# 0.6 en todos los casos salvo ambigüedad genuina. Al mismo tiempo,
+# 0.82 sigue siendo lo bastante estricto para NO confundir servicios
+# genuinamente distintos: "medicina interna" contra el catálogo
+# ["medicina general", ...] puntúa 0.812 — por debajo del umbral, así
+# que cae al fallback en vez de asumir "medicina general" por error.
+_UMBRAL_FUZZY_SERVICIO = 0.82
+
+
+def _tokens_sin_puntuacion_de_borde(texto: str) -> List[str]:
+    return [p for p in (palabra.strip(".,;:!?¿¡") for palabra in texto.split()) if p]
+
+
+def _similitud_servicio(tokens_texto: List[str], servicio_normalizado: str) -> float:
+    """Compara el texto libre del paciente (ya tokenizado) contra UN
+    nombre real de servicio, tolerando palabras de más alrededor (ej.
+    "necesito una cita de pediatria por favor" contra "pediatria"): se
+    prueban todas las ventanas contiguas de tokens del MISMO largo que
+    el servicio (1 palabra para "pediatria", 2 para "medicina general",
+    etc.) y se toma la mejor similitud de cualquiera de ellas — nunca
+    el texto completo contra un servicio corto, que penalizaría por
+    longitud sin razón."""
+    palabras_servicio = servicio_normalizado.split()
+    n = len(palabras_servicio)
+    if len(tokens_texto) < n:
+        ventanas = [" ".join(tokens_texto)]
+    else:
+        ventanas = [" ".join(tokens_texto[i : i + n]) for i in range(len(tokens_texto) - n + 1)]
+    return max(
+        (SequenceMatcher(None, ventana, servicio_normalizado).ratio() for ventana in ventanas),
+        default=0.0,
+    )
+
+
+def _emparejar_servicio_por_similitud(texto: str, servicios: List[str]) -> Tuple[Optional[str], List[str]]:
+    """Devuelve `(servicio_elegido, candidatos_ambiguos)` — nunca ambos
+    a la vez con contenido: un único candidato claro por encima del
+    umbral -> `(nombre, [])`; dos o más candidatos reales por encima
+    del umbral (ambigüedad genuina) -> `(None, [nombres...])`, nunca se
+    elige por el paciente; ninguno por encima del umbral -> `(None,
+    [])`, mismo fallback de siempre."""
+    tokens = _tokens_sin_puntuacion_de_borde(_sin_tildes(texto).lower())
+    puntajes = {
+        servicio: _similitud_servicio(tokens, _sin_tildes(servicio).lower())
+        for servicio in servicios
+    }
+    candidatos = sorted(
+        (servicio for servicio, puntaje in puntajes.items() if puntaje >= _UMBRAL_FUZZY_SERVICIO),
+        key=lambda servicio: puntajes[servicio],
+        reverse=True,
+    )
+    if len(candidatos) == 1:
+        return candidatos[0], []
+    if len(candidatos) >= 2:
+        return None, candidatos
+    return None, []
 
 
 class HealthBrain:
@@ -483,14 +565,33 @@ class HealthBrain:
         (nunca inventa ni asume el primero de la lista si el paciente no
         fue claro) — comparación sin tildes (recado 030, mismo criterio
         que `_CONSULTAR_SERVICIOS`), para que "odontologia" reconozca
-        "Odontología" del catálogo real."""
+        "Odontología" del catálogo real. Si no hay match exacto, se
+        intenta con tolerancia a errores de tipeo (recado 036,
+        `_emparejar_servicio_por_similitud`) antes de rendirse al
+        fallback — nunca inventa un servicio que no exista en el
+        catálogo real, y nunca elige por el paciente si el texto es
+        ambiguo entre dos o más servicios reales."""
         listar = getattr(self._appointment_service, "list_services", None)
         servicios = listar() if listar else []
         normalizado = _sin_tildes(texto)
         elegido = next((s for s in servicios if _sin_tildes(s.lower()) in normalizado), None)
+        candidatos_ambiguos: List[str] = []
+        if elegido is None and servicios:
+            # Match exacto/substring (arriba) no encontró nada — antes
+            # de rendirse al fallback genérico, se intenta con
+            # tolerancia a errores de tipeo (recado 036). Nunca al
+            # revés: el match exacto sigue siendo siempre la primera
+            # opción, más barato y sin ningún riesgo de falso positivo.
+            elegido, candidatos_ambiguos = _emparejar_servicio_por_similitud(texto, servicios)
         if elegido is None:
             nuevos = datos
-            if servicios:
+            if candidatos_ambiguos:
+                texto_candidatos = ", ".join(candidatos_ambiguos)
+                variante, nuevos = _elegir_variante(
+                    _VARIANTES_SERVICIO_AMBIGUO, datos, "intentos_aclaracion_servicio_ambiguo"
+                )
+                respuesta = variante.format(opciones=texto_candidatos)
+            elif servicios:
                 texto_servicios = ", ".join(servicios)
                 variante, nuevos = _elegir_variante(
                     _VARIANTES_SERVICIO_NO_IDENTIFICADO, datos, "intentos_aclaracion_servicio"
