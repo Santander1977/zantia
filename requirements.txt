@@ -13,7 +13,9 @@ httpx>=0.27,<0.28  # requerido por fastapi.testclient.TestClient (smoke test de 
 fastapi>=0.115,<0.116
 uvicorn>=0.30,<0.31
 
-# Opcional — solo necesaria si se usa core/brain.py:AnthropicBrain con
-# un modelo real. NO se instala por defecto ni es requerida para correr
-# la suite de tests (que usa FakeBrain). Descomentar si se activa:
-# anthropic>=0.40
+# Necesaria para core/brain.py:AnthropicBrain y
+# domains/health/llm_brain.py:AnthropicResponseDrafter (recado 038,
+# HEALTH_BRAIN_TYPE=llm) — sin ANTHROPIC_API_KEY configurada, ninguno
+# de los dos se usa (fallback determinista, ver recado 038), pero el
+# import perezoso de este paquete solo funciona si está instalado.
+anthropic>=0.40

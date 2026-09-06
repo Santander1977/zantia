@@ -7,6 +7,7 @@ from .rules import (
     FueraDeAlcanceGuardrail,
     NoPrometerContactoGuardrail,
     SenalDeUrgenciaNoSePuedeBajarGuardrail,
+    TipoDePreguntaAlteradaGuardrail,
     reglas_core_por_defecto,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "FueraDeAlcanceGuardrail",
     "NoPrometerContactoGuardrail",
     "SenalDeUrgenciaNoSePuedeBajarGuardrail",
+    "TipoDePreguntaAlteradaGuardrail",
     "reglas_core_por_defecto",
 ]

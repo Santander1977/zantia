@@ -34,6 +34,27 @@ class _DrafterQueFalla:
         raise RuntimeError("fallo simulado de red/API")
 
 
+class _DrafterQueCambiaTipoDePregunta:
+    """Reproduce el patrón EXACTO del "Caso 2" real encontrado en el
+    recado 038 (primera llamada real a Claude): convierte una pregunta
+    de selección ("¿Cuál prefieres?", con horarios ya enumerados) en
+    una pregunta de sí/no ("¿Confirmamos esa cita?"). Reutiliza la(s)
+    hora(s)/fecha(s) REALES del propio texto_base (nunca inventa un
+    valor nuevo) — así aísla el hallazgo específico de este recado
+    (cambio de TIPO de pregunta) sin disparar también
+    `DatoInventadoGuardrail` (que es un hallazgo distinto, ya cubierto
+    en `test_guardrail_bloquea_una_alucinacion_del_llm_de_extremo_a_extremo`)."""
+
+    def draft(self, mensaje_paciente: str, texto_base: str) -> str:
+        from domains.health.llm_brain import _RE_FECHA, _RE_HORA
+
+        horas = _RE_HORA.findall(texto_base)
+        fechas = _RE_FECHA.findall(texto_base)
+        hora = horas[-1] if horas else "esa hora"
+        fecha = fechas[0] if fechas else "esa fecha"
+        return f"¡Perfecto! Entonces quedarías agendado el {fecha} a las {hora}. ¿Confirmamos esa cita?"
+
+
 # ---------------------------------------------------------------------
 # 1. HealthAnthropicBrain redacta usando datos reales del contexto —
 #    tool_requerida/confirmacion_estructurada_para_write/propuesta de
@@ -133,6 +154,30 @@ def test_guardrail_bloquea_una_alucinacion_del_llm_de_extremo_a_extremo(monkeypa
     assert "cupo especial" not in r1.lower()
     assert "no puedo continuar con esa acción todavía" in r1.lower()
     assert "dato_inventado" in r1.lower()
+
+
+def test_guardrail_de_tipo_de_pregunta_restaura_el_texto_base_reproduciendo_caso_2(
+    monkeypatch, services, activity_factory
+):
+    """Recado 039 — reproduce de extremo a extremo el hallazgo real del
+    recado 038 (Caso 2): el LLM convierte "¿Cuál prefieres?" (PASO 3,
+    horarios ya enumerados) en "¿Confirmamos esa cita?". El paciente
+    debe seguir viendo la pregunta de selección ORIGINAL — nunca la
+    de sí/no — para que su siguiente respuesta (un ordinal) siga
+    siendo interpretable por `HealthBrain`."""
+    context = _contexto_con_drafter(monkeypatch, services, activity_factory, _DrafterQueCambiaTipoDePregunta())
+    accept_activity(context)
+    contact_patient(context)
+    handle_patient_message(context, "m1", "sí")  # ofrece fechas (PASO 2)
+    r1 = handle_patient_message(context, "m2", "1")  # elige fecha -> ofrece horarios (PASO 3)
+
+    assert "confirmamos esa cita" not in r1.lower()
+    assert "¿cuál" in r1.lower()
+
+    # Y la conversación sigue siendo interpretable con un ordinal —
+    # nunca se rompió el contrato del turno siguiente.
+    r2 = handle_patient_message(context, "m3", "1")
+    assert "no logré identificar" not in r2.lower()
 
 
 def test_flujo_normal_con_llm_bien_portado_llega_hasta_la_reserva_real(monkeypatch, services, activity_factory):

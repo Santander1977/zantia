@@ -205,6 +205,72 @@ class ConfirmacionEstructuradaRequeridaParaWriteGuardrail:
         )
 
 
+# Detección de "tipo de pregunta" — agnóstica de dominio (recado 039,
+# hallazgo real de la primera llamada real a Claude en el recado 038):
+# no depende de vocabulario de ningún negocio, solo de la ESTRUCTURA
+# genérica de una pregunta de selección por chat ("¿Cuál...?" y/o una
+# lista numerada "1) ... 2) ...") — cualquier dominio futuro que
+# ofrezca opciones numeradas comparte esta misma forma.
+_RE_CUAL = re.compile(r"¿cu[aá]l", re.IGNORECASE)
+_RE_OPCION_NUMERADA = re.compile(r"\b[1-3]\)")
+
+
+def _es_pregunta_de_seleccion(texto: str) -> bool:
+    """True si `texto` tiene la forma de una pregunta que espera que el
+    usuario ELIJA entre opciones ya enumeradas — "¿Cuál...?" o al menos
+    2 marcadores numerados ("1)"/"2)"). Deliberadamente conservador
+    (mínimo 2 marcadores numerados, no 1) para no confundir un número
+    cualquiera en el texto con una lista real."""
+    return bool(_RE_CUAL.search(texto)) or len(_RE_OPCION_NUMERADA.findall(texto)) >= 2
+
+
+class TipoDePreguntaAlteradaGuardrail:
+    """Recado 039 — corrige un hallazgo real de la primera llamada real
+    a Claude (recado 038, "Caso 2"): el texto base determinista
+    preguntaba "¿Cuál prefieres?" (esperando que el paciente elija
+    entre 2 horarios ya enumerados) y el LLM lo redactó como "¿Confirmamos
+    esa cita?" (una pregunta de sí/no) — sin inventar ningún dato falso
+    (por eso `DatoInventadoGuardrail` no lo detecta, correctamente: ese
+    no es su trabajo), pero cambiando el TIPO de respuesta que
+    `HealthBrain` espera en el turno siguiente (un ordinal, no un
+    sí/no) — el mismo patrón de bug real que motivó los recados
+    026/030 (mensaje del paciente sin reconocer).
+
+    Corre en el MISMO punto que `DatoInventadoGuardrail` (antes de que
+    la respuesta llegue al paciente), como capa ADICIONAL, nunca un
+    reemplazo. Solo actúa cuando hay algo que comparar
+    (`context.texto_base_para_comparacion` poblado — nunca lo está con
+    un Brain 100% determinista) y cuando el texto base era genuinamente
+    una pregunta de selección — evita falsos positivos sobre cualquier
+    otro tipo de mensaje."""
+
+    name = "tipo_de_pregunta_alterada"
+
+    def evaluate(self, context: GuardrailContext) -> GuardrailResult:
+        texto_base = context.texto_base_para_comparacion
+        if not texto_base or not _es_pregunta_de_seleccion(texto_base):
+            return GuardrailResult(
+                decision=GuardrailDecision.ALLOW,
+                reason="sin pregunta de selección que preservar",
+                guardrail_name=self.name,
+            )
+        if _es_pregunta_de_seleccion(context.proposed_response or ""):
+            return GuardrailResult(
+                decision=GuardrailDecision.ALLOW, reason="tipo de pregunta preservado", guardrail_name=self.name
+            )
+        return GuardrailResult(
+            decision=GuardrailDecision.MODIFY,
+            reason=(
+                "El texto base esperaba que el paciente eligiera entre opciones ya enumeradas "
+                "('¿Cuál...?'/lista numerada), pero la respuesta redactada cambió el tipo de "
+                "pregunta (recado 039) — se restaura el texto base determinista para no romper "
+                "la interpretación del turno siguiente."
+            ),
+            modified_response=texto_base,
+            guardrail_name=self.name,
+        )
+
+
 # Frases de manipulación conocidas ("prompt injection") — universales,
 # no específicas de ningún dominio. Con el Brain determinista de hoy
 # son en gran parte redundantes (ninguna de estas frases coincide con
@@ -277,6 +343,7 @@ def reglas_core_por_defecto(tool_categories: Dict[str, object]) -> List[Guardrai
         ConsentimientoRequeridoParaWriteGuardrail(tool_categories),
         NoPrometerContactoGuardrail(),
         DatoInventadoGuardrail(),
+        TipoDePreguntaAlteradaGuardrail(),
         ConfirmacionEstructuradaRequeridaParaWriteGuardrail(tool_categories),
         FueraDeAlcanceGuardrail(),
     ]

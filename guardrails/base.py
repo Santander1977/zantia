@@ -61,6 +61,8 @@ class GuardrailContext:
     mensaje_entrante: str = ""
     verificaciones_de_datos: List[VerificacionDeDatos] = field(default_factory=list)
     confirmacion_estructurada_para_write: bool = False
+    # Recado 039 — ver `core.brain.BrainOutput.texto_base_para_comparacion`.
+    texto_base_para_comparacion: Optional[str] = None
 
 
 @dataclass

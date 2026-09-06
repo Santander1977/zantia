@@ -58,6 +58,14 @@ class BrainOutput(BaseModel):
     # tool WRITE debe declarar confirmación explícita, nunca al revés).
     verificaciones_de_datos: List[VerificacionDeDatos] = Field(default_factory=list)
     confirmacion_estructurada_para_write: bool = False
+    # Recado 039: poblado SOLO por un Brain que redacta el texto final
+    # con un mecanismo externo (ej. HealthAnthropicBrain) — el texto
+    # determinista ANTES de esa redacción, para que
+    # TipoDePreguntaAlteradaGuardrail (guardrails/rules.py) pueda
+    # comparar y detectar si el tipo de pregunta cambió. `None` (nunca
+    # poblado) en cualquier Brain 100% determinista — el guardrail
+    # nunca interfiere en ese caso.
+    texto_base_para_comparacion: Optional[str] = None
 
 
 class Brain(Protocol):
