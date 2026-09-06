@@ -24,6 +24,7 @@ proponen solo como `tool_requerida`, nunca se ejecutan desde el Brain
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from core.brain import BrainOutput
@@ -32,20 +33,45 @@ from state.models import ConversationState
 
 from .appointment_service import AppointmentService
 
-_ACEPTA = ("sí", "si,", " si ", "acepto", "me interesa", "claro que", "dale", "vale", "de acuerdo", "está bien")
-_DECLINA = ("no me interesa", "no gracias", "no quiero", "no estoy interesado", "no, gracias")
-# Respuesta de una sola palabra, mensaje COMPLETO (bug real de producción,
-# primera conversación real de un paciente por Telegram, recado 026): un
-# paciente que responde literalmente "Si"/"si" (sin tilde ni coma) a
-# "¿Te gustaría...? Puedes responder sí o no" no coincidía con NINGÚN
-# patrón de `_ACEPTA` — todos exigen tilde, coma o espacios alrededor,
-# precisamente para no confundirse con un "si" incrustado en otra palabra
-# ("asistir", "sinceramente"). Por eso esto se resuelve con una
-# comparación de IGUALDAD sobre el mensaje ya limpiado de puntuación de
-# borde, nunca con un substring adicional en `_ACEPTA`/`_DECLINA` (eso sí
-# reintroduciría el falso positivo que el diseño original evitaba).
-_ACEPTA_PALABRA_UNICA = ("si", "sí")
-_DECLINA_PALABRA_UNICA = ("no",)
+# Normalización de tildes — NUNCA toca "ñ" ("año"/"ano" son palabras
+# distintas, eso no es lo que se está corrigiendo aquí). Bug real de
+# producción, encontrado en 3 recados seguidos con la misma causa raíz
+# (026, 027, 030): un paciente real escribiendo rápido en Telegram omite
+# tildes con mucha frecuencia ("que" en vez de "qué", "Si" en vez de
+# "Sí", "Cual" en vez de "Cuál") — cualquier comparación por palabras
+# clave que EXIJA la tilde falla en silencio contra el español real de
+# un paciente. Aplicado de forma ACOTADA (recado 030): solo a las
+# comparaciones directamente implicadas en los bugs ya reportados
+# (sí/no y catálogo de servicios) — NO se generalizó a todo el archivo
+# de una vez (`_PIDE_INFO`, `_HUMANO`, etc. probablemente comparten el
+# mismo riesgo, sin reportar todavía — ver recomendación en el recado
+# 030 sobre un rediseño más amplio, deliberadamente no implementado en
+# esta sesión).
+_MAPA_SIN_TILDES = str.maketrans("áéíóúÁÉÍÓÚ", "aeiouAEIOU")
+
+
+def _sin_tildes(texto: str) -> str:
+    return texto.translate(_MAPA_SIN_TILDES)
+
+
+# "sí"/"no" como PALABRA (límite de palabra `\b`), no como substring
+# suelto — sigue evitando el falso positivo original ("asistir",
+# "sinceramente") sin la fragilidad de la versión anterior basada en
+# tildes/comas/espacios manuales. Aplicado siempre sobre texto YA sin
+# tildes (`_sin_tildes`), así que reconoce "sí"/"Sí"/"si" por igual, y
+# en CUALQUIER posición del mensaje — no solo como mensaje completo ni
+# solo con coma/espacios alrededor. Bug real que esto corrige (recado
+# 030): "Si claro ayúdame puedes orientarme mejor" no coincidía con
+# NINGÚN patrón de `_ACEPTA` (sin tilde, y "si" es la primera palabra
+# sin coma ni espacio previo) — el paciente quedaba sin poder avanzar
+# aunque su respuesta era claramente afirmativa.
+_RE_PALABRA_SI = re.compile(r"\bsi\b")
+_RE_PALABRA_NO = re.compile(r"\bno\b")
+
+# Frases de aceptación/rechazo MÁS ALLÁ de la palabra suelta "sí"/"no"
+# — ya sin tildes (se comparan contra texto normalizado).
+_ACEPTA_FRASES = ("acepto", "me interesa", "claro que", "dale", "vale", "de acuerdo", "esta bien")
+_DECLINA_FRASES = ("no me interesa", "no gracias", "no quiero", "no estoy interesado")
 # Pregunta por el catálogo de servicios SIN nombrar uno específico
 # (recado 027, bug real: "Programar cuál servicios tienes disponible" no
 # se reconocía como esto — caía a `_PROGRAMAR` en `intent.py` por la
@@ -57,13 +83,23 @@ _DECLINA_PALABRA_UNICA = ("no",)
 # duplicadas en vez de importadas: `intent.py` clasifica un mensaje
 # ENTRANTE sin conversación previa; esto reconoce la misma pregunta
 # DENTRO de una conversación ya abierta — capas distintas, incluso si
-# hoy el catálogo de frases coincide.
+# hoy el catálogo de frases coincide. Ya SIN tildes (recado 030, mismo
+# hallazgo que arriba: "Que tienes disponible para citas" tampoco
+# coincidía con nada por la tilde faltante en "qué") — se comparan
+# contra texto normalizado.
 _CONSULTAR_SERVICIOS = (
-    "qué servicios tienen", "qué servicios tienes", "qué servicios ofrecen",
-    "cuáles servicios", "cuál servicios", "cuál servicio", "qué servicios hay",
-    "servicios disponibles", "qué tienes disponible", "qué tienen disponible",
-    "cuál tienes", "cuáles tienes",
+    "que servicios tienen", "que servicios tienes", "que servicios ofrecen",
+    "cuales servicios", "cual servicios", "cual servicio", "que servicios hay",
+    "servicios disponibles", "que tienes disponible", "que tienen disponible",
+    "cual tienes", "cuales tienes",
 )
+# Saludo simple — reconocido con la MISMA prioridad baja que el
+# fallback final (recado 030, pedido explícito del usuario: "un saludo
+# nuevo debería poder... al menos reconocer que el paciente intentó
+# decir algo"): no dispara ninguna lógica nueva de reserva/estado —
+# solo cambia el tono de la respuesta cuando ninguna otra rama coincide,
+# para que un "Hola" a mitad de una conversación no se sienta ignorado.
+_SALUDOS = ("hola", "buenas", "buenos dias", "buenas tardes", "buenas noches", "que tal", "hey", "ola")
 _HUMANO = ("hablar con alguien", "persona real", "un humano", "un asesor", "quiero hablar con")
 _NO_PUEDE_AHORA = ("no puedo ahora", "ahora no puedo", "en otro momento", "llámame después", "más tarde no")
 _PIDE_INFO = ("qué es", "más información", "cuéntame más", "por qué me contactan", "explícame", "de qué se trata")
@@ -103,19 +139,24 @@ def _contains_any(texto: str, opciones: tuple) -> bool:
     return any(o in texto for o in opciones)
 
 
-def _es_palabra_unica(texto: str, palabras: tuple) -> bool:
-    """Compara por IGUALDAD (no substring) el mensaje completo, ya sin
-    puntuación de borde (`"Si."`, `"¡si!"`) — ver comentario de
-    `_ACEPTA_PALABRA_UNICA` arriba."""
-    return texto.strip(" .!¡¿?,") in palabras
+def _contains_any_sin_tildes(texto: str, opciones: tuple) -> bool:
+    """Igual que `_contains_any`, pero comparando sobre el texto sin
+    tildes (`_sin_tildes`) — `opciones` ya debe venir sin tildes."""
+    return _contains_any(_sin_tildes(texto), opciones)
 
 
 def _es_afirmativo(texto: str) -> bool:
-    return _contains_any(texto, _ACEPTA) or _es_palabra_unica(texto, _ACEPTA_PALABRA_UNICA)
+    normalizado = _sin_tildes(texto)
+    return bool(_RE_PALABRA_SI.search(normalizado)) or _contains_any(normalizado, _ACEPTA_FRASES)
 
 
 def _es_negativo(texto: str) -> bool:
-    return _contains_any(texto, _DECLINA) or _es_palabra_unica(texto, _DECLINA_PALABRA_UNICA)
+    normalizado = _sin_tildes(texto)
+    return bool(_RE_PALABRA_NO.search(normalizado)) or _contains_any(normalizado, _DECLINA_FRASES)
+
+
+def _es_saludo(texto: str) -> bool:
+    return _contains_any_sin_tildes(texto, _SALUDOS)
 
 
 class HealthBrain:
@@ -182,6 +223,8 @@ class HealthBrain:
 
         if etapa == "esperando_decision":
             return self._interpretar_decision(texto, datos)
+        if etapa == "esperando_servicio":
+            return self._interpretar_servicio(texto, datos)
         if etapa == "esperando_documento_beneficiario":
             # Usa `message` SIN lowercase (no `texto`): un documento de
             # identidad es un identificador crudo, no una palabra clave
@@ -204,6 +247,15 @@ class HealthBrain:
 
     # ------------------------------------------------------------------
     def _interpretar_decision(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
+        # Orden de prioridad reajustado (recado 030): las ramas
+        # ESPECÍFICAS (humano, no puede ahora, pide info, catálogo,
+        # beneficiario) se revisan ANTES que el chequeo genérico de
+        # "sí"/"no" — antes, `_es_negativo` corría primero y, al pasar
+        # a reconocer "no" como PALABRA suelta (ver `_RE_PALABRA_NO`
+        # abajo) en cualquier posición del mensaje, habría interceptado
+        # frases como "no puedo asistir ahora" o "no, prefiero hablar
+        # con alguien" ANTES de que su rama específica (más informativa
+        # y correcta) pudiera reconocerlas.
         if _contains_any(texto, _INFO_NO_AUTORIZADA):
             return BrainOutput(
                 senales_detectadas=["informacion_no_autorizada"],
@@ -214,14 +266,6 @@ class HealthBrain:
                 ),
                 proxima_accion_propuesta="preguntar_intencion",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
-            )
-
-        if _es_negativo(texto):
-            nuevos = {**datos, "etapa": "finalizada", "decision": "DECLINED"}
-            return BrainOutput(
-                senales_detectadas=["paciente_declina"],
-                respuesta_propuesta="Entiendo perfectamente, gracias por tu tiempo. Si más adelante cambias de opinión, aquí voy a estar.",
-                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
 
         if _contains_any(texto, _HUMANO):
@@ -266,7 +310,7 @@ class HealthBrain:
         # para que el paciente pueda seguir la conversación con
         # normalidad después (p. ej. decir "sí" para ver disponibilidad,
         # o nombrar uno de los servicios listados).
-        if _contains_any(texto, _CONSULTAR_SERVICIOS):
+        if _contains_any_sin_tildes(texto, _CONSULTAR_SERVICIOS):
             listar = getattr(self._appointment_service, "list_services", None)
             servicios = listar() if listar else []
             if servicios:
@@ -303,28 +347,96 @@ class HealthBrain:
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
 
+        # Chequeo genérico de "sí"/"no" — DESPUÉS de todas las ramas
+        # específicas de arriba (ver comentario de orden al inicio de
+        # este método). `_es_negativo` reconoce "no" como palabra suelta
+        # en cualquier posición (recado 030) — más amplio que antes a
+        # propósito, para no repetir el bug real de "Si claro ayúdame..."
+        # (ver `_RE_PALABRA_SI`/`_RE_PALABRA_NO`), aceptando el costo
+        # conocido de un falso positivo ocasional (ej. "no sé si quiero")
+        # — límite estructural documentado en el recado 030, no resuelto
+        # del todo sin NLU real (ver `.ai/RISKS.md` R-13).
+        if _es_negativo(texto):
+            nuevos = {**datos, "etapa": "finalizada", "decision": "DECLINED"}
+            return BrainOutput(
+                senales_detectadas=["paciente_declina"],
+                respuesta_propuesta="Entiendo perfectamente, gracias por tu tiempo. Si más adelante cambias de opinión, aquí voy a estar.",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+            )
+
         if _es_afirmativo(texto):
             return self._ofrecer_disponibilidad(datos)
 
-        # Redacción deliberadamente NO fija/memorizada (recado 027):
-        # esta es la respuesta que se repite cada vez que el paciente
-        # escribe algo que no reconocemos en esta etapa — sonaba
-        # robótica al repetirse literalmente turno tras turno en una
-        # conversación real. Sigue siendo la MISMA pregunta cerrada de
-        # sí/no (ninguna garantía ni guardrail cambia), solo con mejor
-        # redacción.
+        # Saludo simple (recado 030) — no dispara ninguna transición de
+        # estado nueva, solo reconoce que el paciente escribió algo
+        # antes de repetir la pregunta pendiente, para que no se sienta
+        # ignorado si saluda a mitad de la conversación.
+        saludo = "¡Hola! " if _es_saludo(texto) else ""
+
+        # Redacción deliberadamente NO fija/memorizada (recado 027) y
+        # ahora explícita sobre que la respuesta no se entendió como
+        # sí/no (recado 030, pedido explícito: no repetir la pregunta
+        # original sin ningún reconocimiento de que el paciente intentó
+        # decir algo). Sigue siendo la MISMA pregunta cerrada de sí/no
+        # (ninguna garantía ni guardrail cambia), solo con mejor
+        # redacción y reconociendo el intento.
         return BrainOutput(
-            respuesta_propuesta="¿Te ayudo a agendar tu atención? Con que me digas sí o no, ya sé cómo seguir.",
+            respuesta_propuesta=(
+                f"{saludo}No logré entender si es un sí o un no — "
+                "¿me confirmas si quieres que te ayude a agendar tu atención?"
+            ),
             proxima_accion_propuesta="preguntar_intencion",
             propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
         )
 
     # ------------------------------------------------------------------
+    def _interpretar_servicio(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
+        """Segundo turno del flujo "preguntar servicio primero" (recado
+        030) — solo se llega aquí cuando `gateway.py:_resolver_programar_cita`
+        detectó un catálogo real con MÁS DE UN servicio y, a propósito,
+        no asumió ninguno (ver `_determinar_servicio_inicial`). Match
+        por nombre real EXACTO/substring contra `list_services()`
+        (nunca inventa ni asume el primero de la lista si el paciente no
+        fue claro) — comparación sin tildes (recado 030, mismo criterio
+        que `_CONSULTAR_SERVICIOS`), para que "odontologia" reconozca
+        "Odontología" del catálogo real."""
+        listar = getattr(self._appointment_service, "list_services", None)
+        servicios = listar() if listar else []
+        normalizado = _sin_tildes(texto)
+        elegido = next((s for s in servicios if _sin_tildes(s.lower()) in normalizado), None)
+        if elegido is None:
+            if servicios:
+                texto_servicios = ", ".join(servicios)
+                respuesta = (
+                    f"No logré identificar cuál de estos prefieres: {texto_servicios}. "
+                    "¿Me confirmas el nombre tal como aparece en la lista?"
+                )
+            else:
+                respuesta = "Por ahora no tengo el catálogo de servicios a la mano — ¿me cuentas qué tipo de atención necesitas?"
+            return BrainOutput(
+                respuesta_propuesta=respuesta,
+                proxima_accion_propuesta="preguntar_dato_faltante",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+            )
+        nuevos = {**datos, "servicio_elegido": elegido}
+        return self._ofrecer_disponibilidad(nuevos)
+
+    # ------------------------------------------------------------------
     def _ofrecer_disponibilidad(self, datos: Dict[str, Any]) -> BrainOutput:
         """Extraído de la rama `_ACEPTA` de `_interpretar_decision`
         (recado 013) para que también lo use el flujo de confirmación de
-        beneficiario, sin duplicar la lógica de ofrecer disponibilidad."""
-        servicio = self._activity.service or "medicina general"
+        beneficiario, sin duplicar la lógica de ofrecer disponibilidad.
+
+        `datos.get("servicio_elegido")` tiene prioridad (recado 030):
+        cuando el paciente respondió explícitamente cuál servicio quiere
+        (ver `_interpretar_servicio`), ESE es el servicio real a
+        consultar — nunca `self._activity.service` (que para una
+        Activity sintética de `gateway.py:_resolver_programar_cita`
+        puede venir vacío a propósito, ver `_determinar_servicio_inicial`)
+        ni el fallback histórico "medicina general" (causa raíz de los
+        recados 027 y 030: asumía un servicio que el paciente nunca
+        confirmó)."""
+        servicio = datos.get("servicio_elegido") or self._activity.service or "medicina general"
         opciones = self._appointment_service.get_availability(servicio)[:3]
         nuevos = {
             **datos,

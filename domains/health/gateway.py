@@ -219,6 +219,14 @@ def start_activity_and_register(gateway: HealthGateway, activity: Activity) -> H
 # tools — sin duplicar nada; ver docstring del módulo).
 # ---------------------------------------------------------------------
 def _nueva_activity_sintetica(patient_reference: str, channel: str, objective: str, **overrides) -> Activity:
+    """`service` YA NO tiene un default hardcodeado aquí (recado 030 —
+    antes era "medicina general" a ciegas, causa raíz de los recados 027
+    y 030): cada llamador decide explícitamente qué `service` pasar —
+    `_resolver_gestion_de_cita_existente` ya pasaba el real de la cita
+    existente (`cita.service`, sin cambios); `_resolver_programar_cita`
+    ahora decide el suyo vía `_determinar_servicio_inicial`. Sin
+    override, `Activity.service` queda en su default real (`None`) —
+    nunca una adivinanza."""
     datos = {
         "activity_id": f"SYN-{uuid.uuid4().hex[:10]}",
         "source_system": "PATIENT_INITIATED",
@@ -226,7 +234,6 @@ def _nueva_activity_sintetica(patient_reference: str, channel: str, objective: s
         "objective": objective,
         "patient_reference": patient_reference,
         "patient_contact": {},
-        "service": "medicina general",
         "permitted_channels": [channel],
     }
     datos.update(overrides)
@@ -360,10 +367,43 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
     return _resolver_programar_cita(gateway, request, channel, message_id, text)
 
 
+def _determinar_servicio_inicial(gateway: "HealthGateway"):
+    """Decide el `service` inicial de una Activity sintética de
+    PROGRAMAR_CITA (recado 030): `intent.py` no extrae ningún servicio
+    del texto libre del paciente (fuera de alcance, ver recado 027), así
+    que este punto NUNCA sabe de verdad qué servicio quiere — asumir
+    "medicina general" a ciegas fue la causa raíz de dos bugs reales de
+    producción (recados 027 y 030: el paciente terminaba viendo "sin
+    disponibilidad" para un servicio que nunca pidió). Con el catálogo
+    real teniendo MÁS DE UNO, no se asume ninguno — se devuelve el
+    mensaje para preguntar primero (`(None, mensaje)`). Con 0 o 1
+    servicio real no hay nada que desambiguar, así que se sigue sin
+    preguntar (`(servicio, None)`) — mismo comportamiento de siempre
+    para `MockAppointmentService`, que solo tiene uno.
+
+    Duck-typed (`list_services`, mismo criterio que `buscar_paciente`):
+    un `AppointmentService` que no lo implemente cae al fallback
+    histórico "medicina general", nunca falla."""
+    listar = getattr(gateway.appointment_service, "list_services", None)
+    servicios = listar() if listar else []
+    if len(servicios) == 1:
+        return servicios[0], None
+    if not servicios:
+        return "medicina general", None
+    texto_servicios = ", ".join(servicios)
+    mensaje = (
+        f"Antes de seguir, ¿para cuál servicio te gustaría agendar? "
+        f"Estas son las opciones: {texto_servicios}."
+    )
+    return None, mensaje
+
+
 def _resolver_programar_cita(gateway: HealthGateway, request: PatientRequest, channel: str, message_id: str, text: str) -> str:
+    servicio_inicial, mensaje_preguntar_servicio = _determinar_servicio_inicial(gateway)
     activity = _nueva_activity_sintetica(
         _documento_resuelto(gateway, request.patient_reference), channel,
         objective="Solicitud del paciente: programar cita",
+        service=servicio_inicial,
     )
     activity = gateway.activity_source.create(activity)
     context = build_health_agent_context(
@@ -373,6 +413,21 @@ def _resolver_programar_cita(gateway: HealthGateway, request: PatientRequest, ch
     _sembrar_conversacion_inbound(context)
     register_context(gateway, request.patient_reference, context)
     gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.EN_PROCESO}))
+
+    if mensaje_preguntar_servicio is not None:
+        # Catálogo real con más de un servicio (recado 030): nunca se
+        # asume cuál quiere el paciente — se pregunta ANTES de mirar
+        # disponibilidad de algo que nunca confirmó. `etapa` se escribe
+        # directo (mismo patrón que `_sembrar_conversacion_inbound`):
+        # todavía no hay ninguna respuesta del paciente que interpretar
+        # en este primer turno, así que no hace falta pasar por
+        # `HealthBrain.interpret()` para componerlo.
+        estado = context.orchestrator.store.get(context.activity.activity_id)
+        nuevos_datos = {**estado.datos_recopilados, "etapa": "esperando_servicio"}
+        context.orchestrator.store.save(
+            estado.model_copy(update={"datos_recopilados": nuevos_datos}), expected_version=estado.version
+        )
+        return mensaje_preguntar_servicio
 
     # HealthBrain (sin tocar) espera una señal de aceptación explícita
     # para pasar a ofrecer disponibilidad (ver brain.py:_ACEPTA). Como

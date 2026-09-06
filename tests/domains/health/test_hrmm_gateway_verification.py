@@ -196,3 +196,57 @@ def test_reprogramar_sin_disponibilidad_no_promete_contacto(monkeypatch):
     assert "te contactamos" not in respuesta.lower()
     assert "no tengo otros horarios disponibles" in respuesta.lower()
     assert "999" not in gateway._pending_verifications
+
+
+def test_pregunta_de_servicio_usa_el_catalogo_real_sincronizado_de_hrmm(monkeypatch):
+    """Confirma la cadena COMPLETA end-to-end (recado 030, pedido
+    explícito del usuario): la pregunta "¿para cuál servicio?" de
+    `gateway.py:_determinar_servicio_inicial` consulta
+    `HrmmAppointmentService.list_services()`, que a su vez delega en
+    `CatalogMirror.listar_nombres()` — el MISMO catálogo que
+    `CatalogMirror.sync()` ya sincronizó contra `GET
+    /api/agenda/servicios`, nunca una lista hardcodeada ni de ejemplo.
+
+    Los 5 nombres reales de producción no están documentados en este
+    repo (recado 025 solo confirmó "5 servicios reales" sin listarlos
+    por nombre) — este test usa `FakeHttpClient` con nombres de
+    ejemplo CLARAMENTE etiquetados como tales, para probar el
+    CABLEADO end-to-end sin necesitar red real ni inventar nombres que
+    no se pueden verificar desde aquí."""
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+
+    servicios_reales_de_ejemplo = [
+        {"servicio_id": "S1", "nombre": "Medicina General"},
+        {"servicio_id": "S2", "nombre": "Odontología"},
+        {"servicio_id": "S3", "nombre": "Psicología"},
+    ]
+
+    def generador(method, path, params, json_body, headers):
+        if method == "GET" and path == "/api/agenda/servicios":
+            return HttpResponse(200, servicios_reales_de_ejemplo)
+        if method == "GET" and path == "/api/agenda/medicos":
+            return HttpResponse(200, [])
+        if method == "GET" and path == "/api/agenda/citas":
+            return HttpResponse(200, [])
+        raise AssertionError(f"no programado en este test: {method} {path} {params}")
+
+    http = FakeHttpClient(generador=generador)
+    catalog = CatalogMirror()
+    catalog.sync(http)  # la MISMA llamada real que hace build_appointment_service() al arrancar
+
+    # Confirma que el catálogo realmente sincronizó estos 3 nombres
+    # ANTES de involucrar al gateway — aísla "el catálogo sincronizó
+    # bien" de "el gateway lo consulta bien".
+    assert catalog.listar_nombres() == ["Medicina General", "Odontología", "Psicología"]
+
+    service = HrmmAppointmentService(http, catalog)
+    gateway = build_health_gateway(MockActivitySource(), service, ReminderManager(), MockActivityResultSink())
+
+    respuesta = handle_inbound_message(gateway, "999", "demo", "m1", "necesito una cita")
+
+    # El mensaje que vería el paciente real contiene EXACTAMENTE los
+    # nombres sincronizados — ni inventados, ni de un catálogo de Mock.
+    assert "Medicina General" in respuesta
+    assert "Odontología" in respuesta
+    assert "Psicología" in respuesta
+    assert "opciones disponibles" not in respuesta.lower()  # no asumió ninguno todavía
