@@ -18,7 +18,7 @@ from domains.health import (
     start_activity_and_register,
 )
 from domains.health.agent import build_health_agent_context, handle_patient_message, handle_reminder_response
-from domains.health.brain import HealthBrain
+from domains.health.brain import HealthBrain, _formatear_fecha_humana
 from domains.health.gateway import build_health_gateway, find_open_context
 
 
@@ -89,7 +89,10 @@ def test_consultar_cita_usa_appointment_service_como_fuente_real(gateway, servic
 
     respuesta = handle_inbound_message(gateway, "PAC-CORR-4", "demo", "m3", "cuándo es mi cita?")
 
-    assert cita_real.date in respuesta
+    # Recado 054: la lista de "consultar mis citas" muestra la fecha en
+    # formato humano (mismo formato ya usado en el resto del archivo),
+    # nunca la fecha ISO cruda.
+    assert _formatear_fecha_humana(cita_real.date) in respuesta
     assert cita_real.time in respuesta
     assert cita_real.location in respuesta
 

@@ -223,18 +223,29 @@ class ConfirmacionEstructuradaRequeridaParaWriteGuardrail:
 # hallazgo real de la primera llamada real a Claude en el recado 038):
 # no depende de vocabulario de ningún negocio, solo de la ESTRUCTURA
 # genérica de una pregunta de selección por chat ("¿Cuál...?" y/o una
-# lista numerada "1) ... 2) ...") — cualquier dominio futuro que
-# ofrezca opciones numeradas comparte esta misma forma.
+# lista numerada) — cualquier dominio futuro que ofrezca opciones
+# numeradas comparte esta misma forma.
+#
+# Dos formas de marcador numerado, ambas reales en este proyecto (recado
+# 054): `\b[1-3]\)` seguía cubriendo el formato en línea "1) ...; 2) ..."
+# que `_iniciar_reprogramacion` (brain.py) todavía usa sin cambios — la
+# alternativa `(?:^|\n)\s*[1-3]\.` cubre el formato de LISTA NUMERADA con
+# salto de línea real ("1. ...\n2. ...") que domina el resto del archivo
+# desde el recado 054. Sin esta segunda alternativa, un mensaje con el
+# formato nuevo solo se detectaba como pregunta de selección gracias a
+# "¿Cuál...?" — coincidencia, no garantía (un mensaje con lista numerada
+# pero sin esa palabra exacta habría quedado sin proteger).
 _RE_CUAL = re.compile(r"¿cu[aá]l", re.IGNORECASE)
-_RE_OPCION_NUMERADA = re.compile(r"\b[1-3]\)")
+_RE_OPCION_NUMERADA = re.compile(r"\b[1-3]\)|(?:^|\n)\s*[1-3]\.")
 
 
 def _es_pregunta_de_seleccion(texto: str) -> bool:
     """True si `texto` tiene la forma de una pregunta que espera que el
     usuario ELIJA entre opciones ya enumeradas — "¿Cuál...?" o al menos
-    2 marcadores numerados ("1)"/"2)"). Deliberadamente conservador
-    (mínimo 2 marcadores numerados, no 1) para no confundir un número
-    cualquiera en el texto con una lista real."""
+    2 marcadores numerados ("1)"/"2)", o "1."/"2." en su propia línea).
+    Deliberadamente conservador (mínimo 2 marcadores numerados, no 1)
+    para no confundir un número cualquiera en el texto con una lista
+    real."""
     return bool(_RE_CUAL.search(texto)) or len(_RE_OPCION_NUMERADA.findall(texto)) >= 2
 
 

@@ -310,6 +310,16 @@ _MESES = (
 )
 
 
+def _lista_numerada(items: List[str]) -> str:
+    """Recado 054, pedido explícito del usuario: TODO listado que ZANTIA
+    presenta al paciente se muestra como lista numerada, una opción por
+    línea (salto de línea REAL) — nunca como texto corrido separado por
+    comas/punto y coma. `items` ya viene formado con el texto final de
+    cada opción (fecha humana, hora, nombre de servicio, etc. — esta
+    función NUNCA decide qué contiene cada línea, solo la numera)."""
+    return "\n".join(f"{i + 1}. {item}" for i, item in enumerate(items))
+
+
 def _formatear_fecha_humana(fecha_iso: str) -> str:
     """`"2026-09-07"` -> `"Lunes 7 de septiembre"`. Si `fecha_iso` no
     viene en el formato esperado (nunca debería pasar con datos reales
@@ -460,7 +470,19 @@ def _hora_solo_normalizada(hora_24: str) -> Optional[str]:
 
 
 def _horario_coincide_nivel1(texto_normalizado: str, hora_24: str) -> bool:
-    return any(forma in texto_normalizado for forma in _formas_hora_nivel1(hora_24))
+    # Recado 056 — hallazgo real encontrado al escribir pruebas de este
+    # mismo recado: `_sin_tildes` (usado para normalizar `texto_normalizado`
+    # antes de llegar aquí) deliberadamente NUNCA toca la "ñ" (mismo
+    # criterio documentado en otra parte del archivo: "año"/"ano" son
+    # palabras distintas) — pero las formas idiomáticas de este módulo
+    # ("de la mañana"/"de la tarde"/"de la noche") están hardcodeadas SIN
+    # "ñ" ("manana"). Un paciente real que escriba correctamente "8 de
+    # la mañana" (con "ñ", tal como se escribe en español) nunca
+    # matcheaba NINGUNA hora por esta discrepancia — normalizar "ñ"->"n"
+    # SOLO en esta comparación puntual (nunca en `_sin_tildes` global,
+    # que sigue protegiendo "año" en cualquier otro contexto del archivo).
+    texto_sin_ene = texto_normalizado.replace("ñ", "n")
+    return any(forma in texto_sin_ene for forma in _formas_hora_nivel1(hora_24))
 
 
 def _horario_coincide_nivel2(texto_normalizado: str, hora_24: str) -> bool:
@@ -804,8 +826,18 @@ class HealthBrain:
                 if c.status.value in ("CONFIRMED", "RESCHEDULED")
             ]
             if citas:
-                detalles = "; ".join(f"{c.service} el {c.date} a las {c.time} en {c.location}" for c in citas)
-                respuesta = f"Aquí tienes: {len(citas)} cita(s) activa(s): {detalles}."
+                # Recado 054 — lista numerada, fecha en el mismo formato
+                # humano ya establecido en el resto del archivo (nunca
+                # ISO cruda).
+                plural = len(citas) != 1
+                intro = (
+                    f"Aquí tienes tu{'s' if plural else ''} {len(citas)} "
+                    f"cita{'s' if plural else ''} activa{'s' if plural else ''}:"
+                )
+                lista_citas = _lista_numerada([
+                    f"{c.service} — {_formatear_fecha_humana(c.date)}, {c.time}, {c.location}" for c in citas
+                ])
+                respuesta = f"{intro}\n{lista_citas}"
             else:
                 respuesta = "Revisé y no tienes ninguna cita activa registrada por este canal por ahora."
             return BrainOutput(
@@ -888,9 +920,11 @@ class HealthBrain:
         listar = getattr(self._appointment_service, "list_services", None)
         servicios = listar() if listar else []
         if servicios:
-            texto_servicios = ", ".join(servicios)
+            # Recado 054 — lista numerada, un servicio por línea (nunca
+            # texto corrido separado por comas) — ver `_LISTA_NUMERADA`.
+            lista_servicios = _lista_numerada(servicios)
             respuesta = (
-                f"Claro, estos son los servicios que tenemos disponibles: {texto_servicios}. "
+                f"Claro, estas son las opciones disponibles:\n{lista_servicios}\n"
                 "¿Para cuál te gustaría agendar?"
             )
             nuevos = {**datos, "etapa": "esperando_servicio"}
@@ -1079,9 +1113,9 @@ class HealthBrain:
             "servicio_elegido": servicio,
             "fechas_ofrecidas": fechas,
         }
-        texto_fechas = "; ".join(f"{i+1}) {_formatear_fecha_humana(f)}" for i, f in enumerate(fechas))
+        lista_fechas = _lista_numerada([_formatear_fecha_humana(f) for f in fechas])
         return BrainOutput(
-            respuesta_propuesta=f"Estas son las fechas disponibles: {texto_fechas}. ¿Cuál te queda mejor?",
+            respuesta_propuesta=f"Estas son las fechas disponibles:\n{lista_fechas}\n¿Cuál te queda mejor?",
             # "preguntar_dato_faltante" (no "ejecutar_tool"): todavía
             # falta que el paciente elija fecha y horario antes de
             # reservar — la tool que se ejecuta aquí es de lectura
@@ -1187,7 +1221,27 @@ class HealthBrain:
         se confirmó en el paso anterior)."""
         servicio = datos["servicio_elegido"]
         fecha = datos["fecha_elegida"]
-        opciones = [o for o in self._appointment_service.get_availability(servicio) if o.date == fecha][:3]
+        # Recado 056 — hallazgo real encontrado al investigar el bug de
+        # Odontologia/07:30: `AppointmentService.get_availability` NO
+        # garantiza ningún orden (`HrmmAppointmentService.get_availability`
+        # devuelve los bloques tal como los entrega hrmm-backend — orden de
+        # inserción, no cronológico, confirmado leyendo el JSON real de
+        # `/api/agenda/disponibilidad`: para un servicio con VARIOS
+        # médicos, los bloques de las 07:00 de cada médico aparecen
+        # consecutivos ANTES que los de las 07:30 de cualquiera). Tomar
+        # `[:3]` sin ordenar podía mostrarle al paciente 3 horarios que
+        # NO son los 3 más próximos reales (ej. las 07:00 de 3 médicos
+        # distintos, saltándose las 07:30 de todos ellos) — un defecto de
+        # UX real e independiente del hallazgo puntual reportado (no
+        # explica por sí solo una reserva en un horario nunca ofrecido,
+        # pero es la misma clase de riesgo: mostrar una lista que no
+        # refleja fielmente la disponibilidad real). `_ofrecer_fechas`
+        # (arriba) ya ordenaba sus fechas — esto alinea `_ofrecer_horarios`
+        # con el mismo criterio.
+        opciones = sorted(
+            (o for o in self._appointment_service.get_availability(servicio) if o.date == fecha),
+            key=lambda o: o.time,
+        )[:3]
         if not opciones:
             # Caso raro (condición de carrera real: alguien más reservó
             # el último cupo de esa fecha entre el PASO 2 y esta
@@ -1206,13 +1260,25 @@ class HealthBrain:
             # nada más que comparar contra el texto de la respuesta.
             "horas_ofrecidas": [o.time for o in opciones],
         }
-        texto_horarios = "; ".join(f"{i+1}) {o.time} en {o.location}" for i, o in enumerate(opciones))
         fecha_legible = _formatear_fecha_humana(fecha)
+        # Recado 054 — lista numerada. Si TODAS las opciones comparten el
+        # mismo consultorio (caso real más común: un solo profesional
+        # cubre ese servicio+fecha), se menciona UNA vez en la
+        # introducción y la lista queda solo con la hora — nunca se repite
+        # el mismo dato en cada línea. Si difieren (dos profesionales
+        # distintos ofreciendo el mismo servicio ese día), se mantiene el
+        # consultorio en cada línea — nunca se inventa un consultorio
+        # único que no sea real para todas las opciones.
+        ubicaciones = {o.location for o in opciones}
+        if len(ubicaciones) == 1:
+            ubicacion_unica = next(iter(ubicaciones))
+            intro = f"Para el {fecha_legible} tengo estos horarios disponibles en {ubicacion_unica}:"
+            lista_horarios = _lista_numerada([o.time for o in opciones])
+        else:
+            intro = f"Para el {fecha_legible}, estos son los horarios disponibles:"
+            lista_horarios = _lista_numerada([f"{o.time} en {o.location}" for o in opciones])
         return BrainOutput(
-            respuesta_propuesta=(
-                f"Para el {fecha_legible}, estos son los horarios disponibles: {texto_horarios}. "
-                "¿Cuál prefieres?"
-            ),
+            respuesta_propuesta=f"{intro}\n{lista_horarios}\n¿Cuál prefieres?",
             proxima_accion_propuesta="preguntar_dato_faltante",
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
         )

@@ -36,6 +36,7 @@ from observability.events import EventType
 from .activity_source import ActivitySource
 from .agent import HealthAgentContext, build_health_agent_context, handle_patient_message
 from .appointment_service import AppointmentService, AppointmentStatus
+from .brain import _formatear_fecha_humana, _lista_numerada
 from .confirmation import ConfirmationTracker
 from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
 from .intent import _PROGRAMAR as _PALABRAS_PROGRAMAR_CITA
@@ -1169,8 +1170,20 @@ def _resolver_consulta(gateway: HealthGateway, request: PatientRequest) -> str:
     gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
     if not citas:
         return "Revisé y no tienes ninguna cita activa registrada por este canal por ahora."
-    detalles = "; ".join(f"{c.service} el {c.date} a las {c.time} en {c.location}" for c in citas)
-    return f"Aquí tienes: {len(citas)} cita(s) activa(s): {detalles}."
+    # Recado 054 — mismo formato de lista numerada que
+    # `HealthBrain._detectar_interrupcion_de_contexto` (misma categoría
+    # "consultar mis citas", alcanzada desde una etapa DISTINTA — primer
+    # contacto, sin conversación abierta todavía — pero debe verse
+    # idéntica al paciente sin importar por cuál camino llegó).
+    plural = len(citas) != 1
+    intro = (
+        f"Aquí tienes tu{'s' if plural else ''} {len(citas)} "
+        f"cita{'s' if plural else ''} activa{'s' if plural else ''}:"
+    )
+    lista_citas = _lista_numerada([
+        f"{c.service} — {_formatear_fecha_humana(c.date)}, {c.time}, {c.location}" for c in citas
+    ])
+    return f"{intro}\n{lista_citas}"
 
 
 def _resolver_confirmacion(gateway: HealthGateway, request: PatientRequest) -> str:

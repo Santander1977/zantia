@@ -146,7 +146,8 @@ def test_reproduce_el_bucle_real_mensaje_emocional_tras_reserva_luego_consultar_
     # ya no debe quedar en loop pidiendo el servicio.
     r_consulta = handle_inbound_message(gateway, _PACIENTE, "telegram", "m6", "consultar mis citas")
     assert "no logré identificar" not in r_consulta.lower(), f"quedó en el loop real: {r_consulta!r}"
-    assert "pediatria" in r_consulta.lower() and "2026-09-08" in r_consulta
+    # Recado 054: fecha en formato humano en la lista, no ISO cruda.
+    assert "pediatria" in r_consulta.lower() and "martes 8 de septiembre" in r_consulta.lower()
 
 
 # ---------------------------------------------------------------------
