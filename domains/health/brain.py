@@ -136,6 +136,16 @@ _OLVIDAR = (
     "no quiero que tengas mis datos", "deja de guardar mis datos",
 )
 
+# Recado 047 — etapas que YA son, ellas mismas, parte de un wizard de
+# interrupción en curso (documento/confirmación de beneficiario): se
+# excluyen del chequeo global de interrupciones de contexto para no
+# reinterrumpir un wizard que ya está resolviendo una interrupción
+# anterior (ej. el documento que el paciente escribe ahí no debería
+# poder disparar, por coincidencia, otra interrupción distinta).
+_ETAPAS_SIN_INTERRUPCION_DE_CONTEXTO = frozenset(
+    {"esperando_documento_beneficiario", "esperando_confirmacion_beneficiario"}
+)
+
 
 def _contains_any(texto: str, opciones: tuple) -> bool:
     return any(o in texto for o in opciones)
@@ -346,6 +356,27 @@ class HealthBrain:
         if _contains_any(texto, _OLVIDAR):
             return self._iniciar_olvido(datos, etapa)
 
+        # Interrupciones de CONTEXTO (recado 047, corrige un hallazgo
+        # real de producción con HEALTH_BRAIN_TYPE=llm activo, recado
+        # 046): info no autorizada / pedido de humano / "no puedo
+        # ahora" / pide info / declaración de beneficiario se
+        # reconocían SOLO en la etapa "esperando_decision" (el primer
+        # turno) — un paciente que las mencionara en CUALQUIER etapa
+        # posterior (ej. "Odontologia PERO ES PARA MI HIJA" al elegir
+        # servicio) nunca las activaba, aunque el mensaje completo SÍ
+        # llegaba íntegro a esta función (confirmado con evidencia real,
+        # ver recado 046 — el hueco nunca fue que el LLM "escondiera"
+        # texto del código determinista). Ahora se revisan en CUALQUIER
+        # etapa, mismo criterio que `_OLVIDAR` arriba — con la excepción
+        # explícita de las etapas que YA son, ellas mismas, parte de un
+        # wizard de interrupción en curso (`_ETAPAS_SIN_INTERRUPCION_DE_CONTEXTO`),
+        # para no reinterrumpir un wizard que ya está resolviendo una
+        # interrupción anterior.
+        if etapa not in _ETAPAS_SIN_INTERRUPCION_DE_CONTEXTO:
+            interrupcion = self._detectar_interrupcion_de_contexto(texto, datos, etapa)
+            if interrupcion is not None:
+                return interrupcion
+
         # Reprogramar/cancelar/confirmar se reconocen en cualquier etapa
         # posterior a una cita ya reservada (equivalente sano a la
         # interrupción global del Core, pero de dominio: secciones
@@ -398,16 +429,22 @@ class HealthBrain:
         )
 
     # ------------------------------------------------------------------
-    def _interpretar_decision(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
-        # Orden de prioridad reajustado (recado 030): las ramas
-        # ESPECÍFICAS (humano, no puede ahora, pide info, catálogo,
-        # beneficiario) se revisan ANTES que el chequeo genérico de
-        # "sí"/"no" — antes, `_es_negativo` corría primero y, al pasar
-        # a reconocer "no" como PALABRA suelta (ver `_RE_PALABRA_NO`
-        # abajo) en cualquier posición del mensaje, habría interceptado
-        # frases como "no puedo asistir ahora" o "no, prefiero hablar
-        # con alguien" ANTES de que su rama específica (más informativa
-        # y correcta) pudiera reconocerlas.
+    def _detectar_interrupcion_de_contexto(
+        self, texto: str, datos: Dict[str, Any], etapa_actual: str
+    ) -> Optional[BrainOutput]:
+        """Recado 047 — extraído de `_interpretar_decision` (donde antes
+        vivían, solo alcanzables desde la etapa "esperando_decision") para
+        que estas 5 categorías se revisen en CUALQUIER etapa (ver llamada
+        en `interpret()`), sin duplicar la lógica de detección en cada
+        función de etapa específica (`_interpretar_servicio`,
+        `_interpretar_fecha`, `_interpretar_horario`, etc. — ninguna de
+        ellas necesitó tocarse). Devuelve `None` si el texto no coincide
+        con ninguna — quien llama sigue con el flujo normal de esa etapa.
+
+        Mismo orden de prioridad que tenía `_interpretar_decision` (recado
+        030): info no autorizada, humano, no puede ahora, pide info,
+        beneficiario — antes de que la etapa específica interprete el
+        mensaje a su manera."""
         if _contains_any(texto, _INFO_NO_AUTORIZADA):
             return BrainOutput(
                 senales_detectadas=["informacion_no_autorizada"],
@@ -417,6 +454,9 @@ class HealthBrain:
                     "en manos del equipo para que te ayuden con eso."
                 ),
                 proxima_accion_propuesta="preguntar_intencion",
+                # `etapa` no cambia (mismo `datos` sin tocar) — el
+                # paciente sigue exactamente donde estaba, en CUALQUIER
+                # etapa (antes esto solo era cierto para "esperando_decision").
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
             )
 
@@ -452,9 +492,99 @@ class HealthBrain:
                     "programar tu atención cuando te quede cómodo. ¿Revisamos juntos las opciones de horario?"
                 ),
                 proxima_accion_propuesta="preguntar_intencion",
+                # `etapa` no cambia — mismo criterio que INFO_NO_AUTORIZADA
+                # arriba.
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
             )
 
+        # Gestión para un beneficiario (recado 013, generalizado a
+        # cualquier etapa en el recado 047 — hallazgo real de
+        # producción, recado 046: "Odontologia pero es para mi hija" al
+        # elegir servicio nunca activaba esto). `etapa_antes_de_beneficiario`
+        # (mismo patrón ya usado por `_iniciar_olvido`/
+        # `etapa_antes_de_olvido`) es lo que le permite a
+        # `_interpretar_confirmacion_beneficiario` RETOMAR exactamente
+        # donde el paciente iba — nunca reiniciar el flujo completo —
+        # sin perder nada de lo ya elegido (`datos` se preserva íntegro
+        # vía `{**datos, ...}`, solo se agrega/sobrescribe la etapa).
+        if _contains_any(texto, _PARA_OTRO) and getattr(self._appointment_service, "buscar_paciente", None) is not None:
+            nuevos = {
+                **datos,
+                "etapa": "esperando_documento_beneficiario",
+                "etapa_antes_de_beneficiario": etapa_actual,
+            }
+            return BrainOutput(
+                senales_detectadas=["gestion_para_beneficiario_declarada"],
+                respuesta_propuesta=(
+                    "Con gusto te ayudo con eso — ¿me confirmas el número de documento de identidad "
+                    "de la persona para quien es la cita?"
+                ),
+                proxima_accion_propuesta="preguntar_dato_faltante",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+            )
+
+        return None
+
+    def _reanudar_tras_interrupcion(self, etapa_a_reanudar: str, datos: Dict[str, Any]) -> BrainOutput:
+        """Recado 047 — tras resolver una interrupción que sí necesita
+        "retomar" el flujo (hoy, solo la confirmación de beneficiario —
+        HUMANO/NO_PUEDE_AHORA terminan la conversación,
+        INFO_NO_AUTORIZADA/PIDE_INFO nunca cambian de etapa, así que no
+        necesitan esto), vuelve exactamente al punto donde el paciente
+        iba. Reutiliza las funciones "ofrecer" YA EXISTENTES (nunca
+        reconstruye un mensaje a mano con datos potencialmente
+        obsoletos) — cada una vuelve a consultar `AppointmentService`
+        con lo YA elegido (`servicio_elegido`/`fecha_elegida`, todavía
+        en `datos`), así que la disponibilidad que se muestra sigue
+        siendo real, nunca cacheada a ciegas."""
+        if etapa_a_reanudar == "esperando_servicio":
+            # A diferencia de las demás ramas, aquí el paciente TODAVÍA
+            # no había elegido servicio (`servicio_elegido` no está en
+            # `datos`) — saltar directo a `_ofrecer_fechas` usaría el
+            # default equivocado (`self._activity.service`, ej. "medicina
+            # general") en vez de volver a preguntar. Mismo catálogo real
+            # que ya se le mostró antes de esta interrupción.
+            return self._ofrecer_catalogo_servicios(datos)
+        if etapa_a_reanudar == "esperando_fecha":
+            return self._ofrecer_fechas(datos)
+        if etapa_a_reanudar == "esperando_horario":
+            return self._ofrecer_horarios(datos)
+        if etapa_a_reanudar == "esperando_seleccion_reprogramacion":
+            return self._iniciar_reprogramacion(datos)
+        # "esperando_decision" (todavía no se había elegido nada) ->
+        # mismo comportamiento de SIEMPRE (el único caso que existía
+        # antes del recado 047): el siguiente paso natural es ofrecer
+        # fechas reales para el servicio de la Activity.
+        return self._ofrecer_fechas(datos)
+
+    def _ofrecer_catalogo_servicios(self, datos: Dict[str, Any]) -> BrainOutput:
+        """Extraído de `_interpretar_decision` (recado 047) para
+        reutilizarlo también desde `_reanudar_tras_interrupcion` — mismo
+        catálogo REAL, nunca inventado, mismo texto."""
+        listar = getattr(self._appointment_service, "list_services", None)
+        servicios = listar() if listar else []
+        if servicios:
+            texto_servicios = ", ".join(servicios)
+            respuesta = (
+                f"Claro, estos son los servicios que tenemos disponibles: {texto_servicios}. "
+                "¿Para cuál te gustaría agendar?"
+            )
+            nuevos = {**datos, "etapa": "esperando_servicio"}
+        else:
+            respuesta = (
+                "Por ahora no tengo el catálogo de servicios a la mano — "
+                "¿me cuentas qué tipo de atención necesitas?"
+            )
+            nuevos = datos
+        return BrainOutput(
+            senales_detectadas=["consulta_catalogo_servicios"],
+            respuesta_propuesta=respuesta,
+            proxima_accion_propuesta="preguntar_dato_faltante",
+            propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+        )
+
+    # ------------------------------------------------------------------
+    def _interpretar_decision(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
         # Pregunta por el catálogo de servicios, sin nombrar uno
         # específico (recado 027) — se responde con el catálogo REAL
         # (`AppointmentService.list_services()`, duck-typed, nunca
@@ -469,43 +599,13 @@ class HealthBrain:
         # Sin catálogo disponible, no hay nada que desambiguar — se
         # queda en la misma etapa, sin cambios.
         if _contains_any_sin_tildes(texto, _CONSULTAR_SERVICIOS):
-            listar = getattr(self._appointment_service, "list_services", None)
-            servicios = listar() if listar else []
-            if servicios:
-                texto_servicios = ", ".join(servicios)
-                respuesta = (
-                    f"Claro, estos son los servicios que tenemos disponibles: {texto_servicios}. "
-                    "¿Para cuál te gustaría agendar?"
-                )
-                nuevos = {**datos, "etapa": "esperando_servicio"}
-            else:
-                respuesta = (
-                    "Por ahora no tengo el catálogo de servicios a la mano — "
-                    "¿me cuentas qué tipo de atención necesitas?"
-                )
-                nuevos = datos
-            return BrainOutput(
-                senales_detectadas=["consulta_catalogo_servicios"],
-                respuesta_propuesta=respuesta,
-                proxima_accion_propuesta="preguntar_dato_faltante",
-                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
-            )
+            return self._ofrecer_catalogo_servicios(datos)
 
-        # Gestión para un beneficiario (recado 013) — solo si el
-        # AppointmentService activo puede verificar identidad real
-        # (mismo duck-typing que `resolve_patient_identity` en
-        # gateway.py, sin importar nada de ahí para no acoplar capas).
-        if _contains_any(texto, _PARA_OTRO) and getattr(self._appointment_service, "buscar_paciente", None) is not None:
-            nuevos = {**datos, "etapa": "esperando_documento_beneficiario"}
-            return BrainOutput(
-                senales_detectadas=["gestion_para_beneficiario_declarada"],
-                respuesta_propuesta=(
-                    "Con gusto te ayudo con eso — ¿me confirmas el número de documento de identidad "
-                    "de la persona para quien es la cita?"
-                ),
-                proxima_accion_propuesta="preguntar_dato_faltante",
-                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
-            )
+        # Nota (recado 047): la rama de "gestión para beneficiario"
+        # (`_PARA_OTRO`) que antes vivía aquí se movió a
+        # `_detectar_interrupcion_de_contexto`, llamada desde `interpret()`
+        # ANTES de que este método se ejecute — cubre esta etapa
+        # igual que antes, y ahora también cualquier otra.
 
         # Chequeo genérico de "sí"/"no" — DESPUÉS de todas las ramas
         # específicas de arriba (ver comentario de orden al inicio de
@@ -813,12 +913,32 @@ class HealthBrain:
                 proxima_accion_propuesta="preguntar_dato_faltante",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
+        nombre_beneficiario = datos["beneficiario_nombre_candidato"]
         nuevos = {
             **datos,
             "beneficiario_documento": datos["beneficiario_documento_candidato"],
-            "beneficiario_nombre": datos["beneficiario_nombre_candidato"],
+            "beneficiario_nombre": nombre_beneficiario,
         }
-        return self._ofrecer_fechas(nuevos)
+        # Recado 047 — antes esto SIEMPRE llamaba a `_ofrecer_fechas`
+        # directo, correcto solo porque `_PARA_OTRO` únicamente podía
+        # dispararse desde "esperando_decision" (el único punto de
+        # entrada de ese momento). Ahora que la interrupción puede venir
+        # de CUALQUIER etapa (`_detectar_interrupcion_de_contexto` guarda
+        # de dónde en `etapa_antes_de_beneficiario`, mismo patrón que
+        # `etapa_antes_de_olvido`), hay que retomar el punto real donde
+        # el paciente iba — nunca reiniciar el flujo ni perder lo ya
+        # elegido (`servicio_elegido`/`fecha_elegida`, todavía en `datos`).
+        etapa_a_reanudar = datos.get("etapa_antes_de_beneficiario", "esperando_decision")
+        salida = self._reanudar_tras_interrupcion(etapa_a_reanudar, nuevos)
+        # `model_copy(update=...)` (no reconstruir a mano): preserva
+        # TODOS los campos de `salida` (incl. `verificaciones_de_datos`/
+        # `texto_base_para_comparacion`, recado 037/039) — solo se
+        # antepone el reconocimiento del beneficiario al texto real.
+        return salida.model_copy(
+            update={
+                "respuesta_propuesta": f"¡Listo, quedó registrado para {nombre_beneficiario}! {salida.respuesta_propuesta}",
+            }
+        )
 
     # ------------------------------------------------------------------
     # `_elegir_opcion` sigue aquí sin cambios — la reutiliza también

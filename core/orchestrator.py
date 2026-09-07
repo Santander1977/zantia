@@ -26,7 +26,7 @@ from guardrails import (
 )
 from memory.conversation_memory import ConversationMemoryProtocol
 from observability.events import EventLogProtocol, EventType
-from state.machine import InvalidTransitionError, is_terminal, validate_transition
+from state.machine import VALID_TRANSITIONS, InvalidTransitionError, is_terminal, validate_transition
 from state.models import ConversationState, FaseActual, Modo, NivelConfianza, NivelRiesgo, OrigenCambio
 from state.store import ConcurrencyConflictError, StateStore
 from tools.base import ToolCategory, ToolError
@@ -298,7 +298,33 @@ class Orchestrator:
         if fase_actual == FaseActual.INICIO:
             return FaseActual.IDENTIFICACION_DE_INTENCION
         if accion == "preguntar_intencion":
-            return FaseActual.IDENTIFICACION_DE_INTENCION
+            # Hallazgo real del recado 047: un Brain de dominio (ej.
+            # HealthBrain) puede proponer "preguntar_intencion" desde
+            # CUALQUIER etapa suya — no solo la primera — cuando una
+            # interrupción de contexto (pide info/info no autorizada) se
+            # detecta a mitad de flujo (ver `_detectar_interrupcion_de_
+            # contexto`, domains/health/brain.py). Antes, esta rama
+            # siempre apuntaba a IDENTIFICACION_DE_INTENCION sin
+            # importar la fase de origen — válido solo desde INICIO o la
+            # propia IDENTIFICACION_DE_INTENCION (VALID_TRANSITIONS);
+            # desde una fase más avanzada (ej. RECOPILACION_DE_DATOS)
+            # `validate_transition` lo rechazaba con
+            # `InvalidTransitionError`, y el manejo de ese error
+            # ESCALABA la conversación de verdad (mensaje genérico,
+            # `management_status=ESCALATED`) — una consecuencia grave y
+            # nunca intencional de una pregunta aclaratoria inocua.
+            # Ahora: si la fase actual no permite volver a
+            # IDENTIFICACION_DE_INTENCION, la conversación simplemente
+            # se queda en su fase actual (auto-bucle) — la etapa de
+            # dominio (`datos_recopilados["etapa"]`) es la que de verdad
+            # gobierna el flujo del paciente; `fase_actual` es la
+            # clasificación genérica del Core y no debe forzar un
+            # retroceso inválido solo por una pregunta de contexto.
+            if fase_actual == FaseActual.IDENTIFICACION_DE_INTENCION or (
+                FaseActual.IDENTIFICACION_DE_INTENCION in VALID_TRANSITIONS.get(fase_actual, set())
+            ):
+                return FaseActual.IDENTIFICACION_DE_INTENCION
+            return fase_actual
         if accion == "preguntar_dato_faltante":
             if fase_actual in (FaseActual.INICIO, FaseActual.IDENTIFICACION_DE_INTENCION):
                 return FaseActual.RECOPILACION_DE_DATOS
