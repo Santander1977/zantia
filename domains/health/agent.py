@@ -191,18 +191,30 @@ def handle_patient_message(context: HealthAgentContext, message_id: str, text: s
                 context.activity.activity_id, cita.appointment_id, fecha_hora
             )
             verbo = "confirmado" if just_booked else "reprogramado"
-            # "Te enviamos un correo de confirmación..." (recado 035,
-            # pedido explícito, decisión de producto confirmada por el
-            # usuario 2026-09-06): hrmm-backend ya envía ese correo de
-            # forma NATIVA al ejecutar el POST real — ZANTIA nunca lo
-            # dispara ni lo duplica, solo lo complementa
-            # conversacionalmente. Misma frase en `gateway.py` (sub-flujo
-            # de cancelar/reprogramar verificado) — mantener ambas en
-            # sync si se cambia la redacción.
+            # Recado 054/058 — hallazgo real: hrmm-backend NUNCA envía el
+            # correo de forma nativa al ejecutar el POST real (confirmado
+            # leyendo el código real del repo hrmm) — `HrmmAppointmentService.
+            # book_appointment` ahora dispara un segundo paso explícito y
+            # real (`enviar_confirmacion_email`) y devuelve si de verdad
+            # se envió. Se lee de `resultados_tools` (el resultado REAL
+            # de la tool, `ToolResult.data`) — NUNCA de `cita` (arriba):
+            # `get_appointment` es una relectura fresca contra
+            # hrmm-backend, que no sabe nada de esta anotación puramente
+            # del lado de ZANTIA, así que siempre la perdería. El sufijo
+            # es dinámico — nunca la promesa ciega de antes. Misma
+            # función compartida que `gateway.py` (sub-flujo de cancelar/
+            # reprogramar verificado) para que ambos textos se mantengan
+            # en sync automáticamente, sin duplicar la lógica.
+            from .models import sufijo_confirmacion_correo
+
+            nombre_tool = "book_appointment" if just_booked else "reschedule_appointment"
+            correo_confirmacion_enviado = (resultados_tools.get(nombre_tool) or {}).get(
+                "correo_confirmacion_enviado"
+            )
             respuesta = (
                 respuesta
                 + f" ¡Listo! Quedó {verbo}: {cita.service} el {cita.date} a las {cita.time} en {cita.location}."
-                " Te enviamos un correo de confirmación con todos los detalles."
+                + sufijo_confirmacion_correo(correo_confirmacion_enviado)
             )
             evento = "APPOINTMENT_CONFIRMED" if just_booked else "APPOINTMENT_RESCHEDULED"
             context.orchestrator.events.record(context.activity.activity_id, EventType.STATE_TRANSITION, evento=evento)

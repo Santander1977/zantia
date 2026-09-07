@@ -282,6 +282,94 @@ def test_get_availability_contra_hrmm_backend_real():
         assert slot.slot_id and slot.date and slot.time
 
 
+# ---------------------------------------------------------------------
+# Recado 054 — `enviar_confirmacion_email` contra hrmm-backend REAL.
+# Mismo patrón de gate que el resto de esta sección
+# (`ZANTIA_RUN_REAL_HRMM_TESTS=1`), MANUAL e INTERACTIVA a propósito:
+# limpiar la cita de prueba exige el mismo sub-flujo de código de
+# verificación que cualquier cancelación real (`cancel_appointment_verified`
+# — no existe ningún atajo de "cancelación de confianza" sin código en
+# el contrato real de hrmm-backend, confirmado leyendo
+# `HrmmAppointmentService.cancel_appointment`, que SIEMPRE lanza
+# `VerificationRequiredError` — mismo hallazgo que ya documentaba
+# `test_identidad_persistente.py`), y ese código se envía por correo
+# REAL — ningún agente puede leerlo por sí mismo. Se pide con `input()`,
+# a quien corra `pytest -s` a mano.
+#
+# Variables de entorno requeridas (nunca hardcodeadas):
+# - `ZANTIA_RUN_REAL_HRMM_TESTS=1` (gate explícito).
+# - `HRMM_BACKEND_URL`, `HRMM_BACKEND_SECRET` (reales).
+# - `ZANTIA_TEST_CORREO_REAL`: un correo que la persona que corre el
+#   test pueda revisar EN VIVO — recibe la confirmación real (lo que
+#   este test verifica) y luego el código de limpieza.
+#
+# Documento de prueba: `ZANTIA-TEST-CORREO-<epoch>`, claramente
+# marcado, nunca un paciente real — misma convención que
+# `test_identidad_canal_real_e2e`. La cita se crea con una llamada HTTP
+# directa (igual que ese otro test) porque `book_appointment` no
+# recibe `correo` en el body salvo que se lo pasemos explícitamente
+# (recado 054) — acá SÍ se lo pasamos, para poder verificar el envío
+# real de punta a punta.
+# ---------------------------------------------------------------------
+@pytest.mark.skipif(
+    os.environ.get("ZANTIA_RUN_REAL_HRMM_TESTS") != "1",
+    reason="Prueba de red real contra hrmm-backend deshabilitada por defecto — ver recado 054.",
+)
+def test_enviar_confirmacion_email_contra_hrmm_backend_real():
+    import time
+
+    from domains.health.hrmm_http import RealHttpClient
+
+    correo_real = os.environ.get("ZANTIA_TEST_CORREO_REAL")
+    if not correo_real:
+        pytest.skip("ZANTIA_TEST_CORREO_REAL no configurado — requerido para recibir la confirmación real.")
+
+    base_url = os.environ["HRMM_BACKEND_URL"]
+    http_real = RealHttpClient(base_url)
+    catalog_real = CatalogMirror()
+    catalog_real.sync(http_real)
+    servicio_real = next(iter(catalog_real._servicios.values())).nombre
+    service_real = HrmmAppointmentService(http_real, catalog_real)
+
+    documento = f"ZANTIA-TEST-CORREO-{int(time.time())}"
+    telefono = f"5730001{int(time.time()) % 10000:04d}"
+
+    opciones = service_real.get_availability(servicio_real)
+    assert opciones, "Sin disponibilidad real para el servicio elegido — no se puede montar la prueba."
+    slot = opciones[0]
+    respuesta_cita = http_real.request(
+        "POST", "/api/agenda/citas",
+        json_body={
+            "slot_id": slot.slot_id, "documento_paciente": documento,
+            "nombre_paciente": "ZANTIA TEST CORREO 054", "telefono": telefono,
+            "correo": correo_real, "canal": "zantia-test",
+        },
+    )
+    assert respuesta_cita.status == 201, respuesta_cita.body
+    cita_id = respuesta_cita.body["cita_id"]
+
+    try:
+        resultado = service_real.enviar_confirmacion_email(cita_id, correo_real)
+        assert isinstance(resultado, dict) and "exito" in resultado, resultado
+
+        recibido = input(
+            f"\n>>> Revisa {correo_real}: ¿llegó un correo de confirmación real para la cita "
+            f"{cita_id}? (s/n): "
+        ).strip().lower()
+        assert recibido == "s", f"hrmm-backend respondió {resultado!r} pero no llegó el correo real"
+    finally:
+        # Limpieza real: cancela la cita de prueba (mismo rigor que
+        # `test_identidad_canal_real_e2e` — requiere OTRO código real).
+        service_real.send_verification_code(documento)
+        codigo_limpieza = input(
+            f"\n>>> LIMPIEZA: revisa {correo_real} de nuevo y escribe el código para "
+            f"cancelar la cita de prueba {cita_id}: "
+        ).strip()
+        cancelada = service_real.cancel_appointment_verified(cita_id, documento, codigo_limpieza)
+        from domains.health.models import AppointmentStatus
+        assert cancelada.status == AppointmentStatus.CANCELLED, cancelada
+
+
 def test_mapear_estado_con_vocabulario_real_confirmado():
     """Recado 032 — vocabulario real de `Cita.estado` confirmado con una
     llamada real de solo lectura contra hrmm-backend (documento con

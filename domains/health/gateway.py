@@ -36,13 +36,20 @@ from observability.events import EventType
 from .activity_source import ActivitySource
 from .agent import HealthAgentContext, build_health_agent_context, handle_patient_message
 from .appointment_service import AppointmentService, AppointmentStatus
-from .brain import _formatear_fecha_humana, _lista_numerada
+from .brain import _es_despedida, _formatear_fecha_humana, _lista_numerada, _texto_despedida
 from .confirmation import ConfirmationTracker
 from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
 from .intent import _PROGRAMAR as _PALABRAS_PROGRAMAR_CITA
 from .intent import _sin_tildes as _sin_tildes_menu
 from .intent import classify_intent_or_none
-from .models import Activity, ActivityStatus, PatientRequest, RequestIntent, RequestStatus
+from .models import (
+    Activity,
+    ActivityStatus,
+    PatientRequest,
+    RequestIntent,
+    RequestStatus,
+    sufijo_confirmacion_correo,
+)
 from .patient_request_source import MockPatientRequestSource, PatientRequestSource
 from .reminder_manager import ReminderManager
 from .result_sink import ActivityResultSink
@@ -137,15 +144,25 @@ def _tratamiento_formal(nombre: str) -> str:
     return "señora" if primer_nombre.lower().endswith("a") else "señor"
 
 
-# Menú numerado de 4 opciones (recado 046, requisito explícito: SIEMPRE
+# Menú numerado de 5 opciones (recado 046, requisito explícito: SIEMPRE
 # número + palabra, nunca texto corrido) — texto FIJO, nunca redactado
 # por el LLM (misma razón que el resto de este bloque: se construye
 # aquí, jamás se le pasa a HealthBrain/HealthAnthropicBrain).
+#
+# Opción 5 (mensaje urgente posterior al recado 058) — salida EXPLÍCITA
+# y garantizada, independiente de que el lenguaje natural del paciente
+# se reconozca o no: un paciente real quedó atrapado 6+ turnos
+# repitiendo este mismo menú porque ninguna de sus despedidas
+# ("No gracias q tengas buenas noches", "Chao", "No sé que hacer chao")
+# coincidía todavía con `_DESPEDIDA` (brain.py). Ese hueco de vocabulario
+# ya se amplió por separado, pero esta opción numerada NUNCA depende de
+# que el vocabulario esté completo — siempre hay una salida garantizada.
 _MENU_NUMERADO = (
     "1. Reservar una cita\n"
     "2. Reprogramar una cita\n"
     "3. Cancelar una cita\n"
-    "4. Consultar mis citas"
+    "4. Consultar mis citas\n"
+    "5. Salir / terminar"
 )
 
 # Recado 048 — para el turno AMBIGUO que llega DESPUÉS de que ya se le
@@ -190,6 +207,10 @@ _MENU_OPCIONES: tuple = (
     ("2", RequestIntent.REPROGRAMAR_CITA, ()),
     ("3", RequestIntent.CANCELAR_CITA, ("cancelar",)),
     ("4", RequestIntent.CONSULTAR_CITA, ("consultar", "consultar mis citas")),
+    # Recado 058 (mensaje urgente): "5"/"salir"/"terminar" — MISMA
+    # mecánica que las 4 opciones de arriba, nunca un camino nuevo y
+    # paralelo. Ver `_resolver_por_intent` para qué hace `RequestIntent.SALIR`.
+    ("5", RequestIntent.SALIR, ("salir", "terminar")),
 )
 
 
@@ -712,10 +733,25 @@ def _enrutar_solicitud_nueva(
     número/palabra bare haya escrito el paciente. Estrictamente una
     MEJORA de precisión, nunca una regresión: solo agrega
     interpretaciones nuevas para mensajes que antes caían al default
-    incorrecto, no cambia ninguna clasificación que ya funcionaba."""
+    incorrecto, no cambia ninguna clasificación que ya funcionaba.
+
+    Mensaje urgente posterior al recado 058 — hallazgo real: un paciente
+    SIN conversación abierta todavía (nunca escogió ninguna opción del
+    menú) quedó 6+ turnos repitiendo `_MENSAJE_INTENCION_NO_RECONOCIDA`
+    porque sus despedidas ("No gracias q tengas buenas noches", "Chao",
+    "No sé que hacer chao") no eran ni el ordinal/palabra del menú ni
+    ninguna intención de `classify_intent_or_none` — `_es_despedida`
+    (el MISMO detector centralizado de `brain.py`, reutilizado tal cual,
+    nunca duplicado) solo se evaluaba DENTRO de una conversación ya
+    abierta (`HealthBrain.interpret()`), inalcanzable en este punto. Se
+    revisa acá como ÚLTIMO recurso, después de las intenciones
+    normales — para no cambiar ninguna clasificación existente."""
     intent = _interpretar_opcion_menu(text) or classify_intent_or_none(text)
     if intent is None:
-        return None
+        if _es_despedida(text.lower().strip()):
+            intent = RequestIntent.SALIR
+        else:
+            return None
     return _resolver_por_intent(gateway, patient_reference, channel, message_id, text, intent)
 
 
@@ -744,6 +780,18 @@ def _resolver_por_intent(
     if intent == RequestIntent.ESCALAMIENTO:
         gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.ESCALADA}))
         return _MENSAJE_ESCALAMIENTO_INBOUND
+
+    if intent == RequestIntent.SALIR:
+        # Recado 058 (mensaje urgente) — 5ta opción del menú, alcanzada
+        # SIN conversación abierta todavía (ver docstring de
+        # `RequestIntent.SALIR`): no hay ninguna Activity que cerrar acá
+        # (nunca se creó una), así que basta con la misma despedida
+        # cálida — `_texto_despedida`, importada de `.brain`, es la
+        # MISMA función que usa `HealthBrain._DESPEDIDA` dentro de una
+        # conversación en curso, para que el texto sea idéntico en
+        # ambos casos.
+        gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
+        return _texto_despedida(_nombre_conocido(gateway, patient_reference))
 
     if intent == RequestIntent.INFORMACION_SERVICIO:
         return _resolver_consulta_catalogo(gateway, request, channel)
@@ -1070,7 +1118,7 @@ def _evaluar_ventana_de_gracia(
 
     texto = text.lower().strip()
     interrupcion = contexto_cerrado.orchestrator.brain._detectar_interrupcion_de_contexto(  # noqa: SLF001 — mismo paquete, ver docstring
-        texto, datos, etapa
+        texto, datos, etapa, estado.resultado_de_herramientas
     )
     if interrupcion is None:
         return None
@@ -1209,6 +1257,26 @@ def _evaluar_ventana_de_gracia(
         )
         contexto_cerrado.activity_source.update(contexto_cerrado.activity)
         register_context(gateway, patient_reference, contexto_cerrado)
+    elif nuevos_datos.get("etapa") == etapa:
+        # Recado 058 — hallazgo real de producción: la ventana de
+        # gracia es de UN solo uso (`pop` arriba) — una categoría que
+        # "se queda donde estaba" (info no autorizada, pide info,
+        # consultar mis citas, o la nueva "pregunta sobre el correo
+        # enviado") no reabre `_open_conversations` (correcto, no hay
+        # tool ni wizard que retomar), pero eso significa que el
+        # SIGUIENTE mensaje del paciente ya no tenía ninguna ventana que
+        # reevaluar — "confirmame si me enviaste el email" se reconocía
+        # bien, pero la despedida INMEDIATAMENTE después ("no gracias
+        # ya termine") ya no, porque la ventana ya se había consumido.
+        # Se re-arma SOLO cuando la etapa quedó exactamente igual que
+        # antes de esta interrupción (nunca para las que sí cambian de
+        # etapa — humano/no_puede_ahora/despedida son de un solo turno
+        # a propósito, y el wizard de beneficiario ya se maneja arriba
+        # reabriendo la conversación de verdad) — así una cadena de
+        # varios mensajes "de cortesía" tras un cierre sigue
+        # reconociéndose, sin volver a arrancar nunca una solicitud
+        # nueva por accidente.
+        gateway._recien_cerrada[patient_reference] = activity_id
     return interrupcion.respuesta_propuesta
 
 
@@ -1379,15 +1447,23 @@ def _procesar_intento_de_codigo(gateway: HealthGateway, patient_reference: str, 
     codigo = text.strip()
     from .appointment_service import AppointmentServiceError
 
+    # Recado 054/058 — mismo hallazgo que `agent.py`: hrmm-backend NUNCA
+    # envía el correo de forma nativa. `correo` sigue sin estar
+    # disponible en este sub-flujo (ZANTIA no lo captura en ningún
+    # punto de la conversación — mismo límite documentado en el recado
+    # 054/058) — se pasa igual (`None` hoy) para que el mecanismo esté
+    # listo en cuanto exista una fuente real, sin tener que volver a
+    # tocar este archivo.
+    correo_conocido = None
     try:
         if pendiente["action"] == "cancelar":
             cita_resultado = gateway.appointment_service.cancel_appointment_verified(
-                pendiente["appointment_id"], pendiente["documento_paciente"], codigo
+                pendiente["appointment_id"], pendiente["documento_paciente"], codigo, correo=correo_conocido
             )
         else:
             cita_resultado = gateway.appointment_service.reschedule_appointment_verified(
                 pendiente["appointment_id"], pendiente["new_slot_id"],
-                pendiente["documento_paciente"], codigo,
+                pendiente["documento_paciente"], codigo, correo=correo_conocido,
             )
     except AppointmentServiceError as exc:
         if "inválido" in str(exc) or "vencido" in str(exc):
@@ -1398,17 +1474,17 @@ def _procesar_intento_de_codigo(gateway: HealthGateway, patient_reference: str, 
     del gateway._pending_verifications[patient_reference]
     _reportar_resultado_verificado(gateway, pendiente, cita_resultado)
 
-    # Nombre real (recado 034) y correo de confirmación (recado 035,
-    # misma frase que `agent.py` — hrmm-backend ya lo envía de forma
-    # NATIVA al ejecutar el POST real de cancelar/reprogramar, ZANTIA
-    # nunca lo duplica).
+    # Nombre real (recado 034) + sufijo de correo DINÁMICO (recado
+    # 054/058, mismo criterio y misma función compartida que
+    # `agent.py` — nunca la promesa ciega de antes).
     nombre = _nombre_conocido(gateway, patient_reference)
     saludo_nombre = f", {nombre}" if nombre else ""
+    sufijo_correo = sufijo_confirmacion_correo(cita_resultado.correo_confirmacion_enviado)
     if pendiente["action"] == "cancelar":
-        return f"Listo{saludo_nombre}, tu cita quedó cancelada. Te enviamos un correo de confirmación con todos los detalles."
+        return f"Listo{saludo_nombre}, tu cita quedó cancelada.{sufijo_correo}"
     return (
         f"Listo{saludo_nombre}, tu cita quedó reprogramada: {cita_resultado.service} el {cita_resultado.date} "
-        f"a las {cita_resultado.time} en {cita_resultado.location}. Te enviamos un correo de confirmación con todos los detalles."
+        f"a las {cita_resultado.time} en {cita_resultado.location}.{sufijo_correo}"
     )
 
 

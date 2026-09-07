@@ -151,6 +151,52 @@ class Appointment(BaseModel):
     status: AppointmentStatus = AppointmentStatus.REQUESTED
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+    # Recado 054/058 — estado REAL del intento de enviar el correo de
+    # confirmación (nunca una promesa a ciegas): `None` = no se intentó
+    # (no había ningún correo del paciente disponible en este turno),
+    # `True` = hrmm-backend confirmó el envío real, `False` = se
+    # intentó y falló (nunca revierte la acción principal ya exitosa —
+    # ver `HrmmAppointmentService._intentar_enviar_confirmacion`).
+    correo_confirmacion_enviado: Optional[bool] = None
+
+
+def sufijo_confirmacion_correo(correo_confirmacion_enviado: Optional[bool]) -> str:
+    """Recado 054/058 — texto OPCIONAL a concatenar tras confirmar una
+    reserva/cancelación/reprogramación exitosa (`agent.py`/`gateway.py`)
+    — NUNCA la promesa ciega de antes ("Te enviamos un correo de
+    confirmación...", sin haber verificado nada). `None` (nunca se
+    intentó — hoy, el caso más común: ZANTIA no captura el correo del
+    paciente en ningún punto de la conversación) devuelve cadena VACÍA
+    a propósito: omitir el tema es más honesto que forzar una frase
+    sobre algo que no ocurrió en absoluto, y no agrega ruido a cada
+    confirmación mientras esa capacidad no exista."""
+    if correo_confirmacion_enviado is True:
+        return " Te enviamos un correo de confirmación con todos los detalles."
+    if correo_confirmacion_enviado is False:
+        return (
+            " Intentamos enviarte un correo de confirmación, pero no pudimos verificar que "
+            "llegara — si no te llega, avísame y lo revisamos con el equipo."
+        )
+    return ""
+
+
+def respuesta_pregunta_sobre_correo(correo_confirmacion_enviado: Optional[bool]) -> str:
+    """Recado 058 — respuesta HONESTA cuando el paciente pregunta
+    explícitamente si se envió el correo (a diferencia de
+    `sufijo_confirmacion_correo`, aquí SÍ contesta algo en el caso
+    `None` — el paciente hizo una pregunta directa, omitir el tema no
+    es una opción)."""
+    if correo_confirmacion_enviado is True:
+        return "Sí — te enviamos la confirmación por correo, deberías tenerla en tu bandeja."
+    if correo_confirmacion_enviado is False:
+        return (
+            "Intentamos enviarte la confirmación por correo, pero no pudimos verificar que llegara. "
+            "Si no te llegó, avísame y lo revisamos con el equipo."
+        )
+    return (
+        "Buena pregunta — hoy no tenemos un correo tuyo registrado en este canal, así que no se "
+        "envió ninguna confirmación por ese medio."
+    )
 
 
 class AvailabilitySlot(BaseModel):
@@ -246,6 +292,15 @@ class RequestIntent(str, Enum):
     DEMANDA_INDUCIDA = "DEMANDA_INDUCIDA"
     INFORMACION_SERVICIO = "INFORMACION_SERVICIO"
     ESCALAMIENTO = "ESCALAMIENTO"
+    # Mensaje urgente posterior al recado 058 — 5ta opción fija del menú
+    # numerado (`gateway.py:_MENU_NUMERADO`), reconocida por el MISMO
+    # mecanismo ya existente (`_interpretar_opcion_menu`/`_resolver_por_intent`)
+    # que las otras 4, nunca un camino nuevo y paralelo. Solo alcanzable
+    # SIN conversación abierta todavía (ver `_enrutar_solicitud_nueva`) —
+    # la despedida DENTRO de una conversación en curso ya la reconoce
+    # `HealthBrain._es_despedida`/`_DESPEDIDA` (recado 058), un mecanismo
+    # distinto y ya existente para ese otro caso.
+    SALIR = "SALIR"
 
 
 class RequestStatus(str, Enum):

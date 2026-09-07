@@ -8,11 +8,23 @@ Recado 035 — dos pedidos en un mismo trabajo:
    lo ya elegido en el paso anterior.
 
 2. Mensaje de confirmación por correo tras cualquiera de las 3 acciones
-   reales (reservar, cancelar, reprogramar) — decisión de producto
-   confirmada explícitamente por el usuario (2026-09-06): hrmm-backend
-   ya envía ese correo de forma NATIVA al ejecutar el POST real; ZANTIA
-   nunca lo dispara ni lo duplica, solo lo complementa
-   conversacionalmente.
+   reales (reservar, cancelar, reprogramar).
+
+   ACTUALIZADO (recado 054, corrige una suposición del 035 nunca
+   verificada contra el código real): la decisión de producto original
+   ("hrmm-backend ya envía ese correo de forma NATIVA al ejecutar el
+   POST real") resultó ser FALSA — confirmado leyendo el código real
+   del repo hermano hrmm: ni `crear_cita` ni `cancelar_cita`/
+   `reprogramar_cita_endpoint` disparan ningún correo; existe un
+   endpoint aparte (`POST /citas/{id}/enviar-confirmacion`) que hay que
+   llamar explícitamente. Antes de este hallazgo, ZANTIA prometía en
+   texto un correo que NUNCA se enviaba de verdad. Los tests de la
+   sección 2 (abajo) ahora verifican la versión honesta: la frase de
+   correo solo aparece cuando `HrmmAppointmentService` de verdad
+   disparó `enviar_confirmacion_email` y tiene un correo real para
+   hacerlo — hoy ZANTIA no captura el correo del paciente en ningún
+   punto de la conversación, así que en estos tests (sin correo
+   conocido) el sufijo queda vacío, nunca una promesa en falso.
 """
 from domains.health import (
     MockActivitySource, MockActivityResultSink, ReminderManager,
@@ -138,7 +150,9 @@ def test_correo_de_confirmacion_tras_reserva_real(monkeypatch):
     r3 = handle_inbound_message(gateway, "999", "demo", "m3", "1")
 
     assert "confirmado" in r3.lower()
-    assert "te enviamos un correo de confirmación" in r3.lower()
+    # Recado 054 — sin correo conocido (ZANTIA no lo captura hoy), NUNCA
+    # se promete un envío que no ocurrió (ver docstring del módulo).
+    assert "te enviamos un correo de confirmación" not in r3.lower()
     assert len(citas_reales) == 1
 
 
@@ -184,7 +198,8 @@ def test_correo_de_confirmacion_tras_cancelacion_real(monkeypatch):
     r2 = handle_inbound_message(gateway, "999", "demo", "m2", "654321")
 
     assert "cancelada" in r2.lower()
-    assert "te enviamos un correo de confirmación" in r2.lower()
+    # Recado 054 — sin correo conocido, mismo criterio que arriba.
+    assert "te enviamos un correo de confirmación" not in r2.lower()
     assert "enzo" in r2.lower(), "el nombre debe aparecer también en la confirmación de cancelación"
 
 
@@ -226,4 +241,5 @@ def test_correo_de_confirmacion_tras_reprogramacion_real(monkeypatch):
     r3 = handle_inbound_message(gateway, "999", "demo", "m3", "111222")
 
     assert "reprogramada" in r3.lower()
-    assert "te enviamos un correo de confirmación" in r3.lower()
+    # Recado 054 — sin correo conocido, mismo criterio que arriba.
+    assert "te enviamos un correo de confirmación" not in r3.lower()

@@ -60,7 +60,17 @@ class BookAppointmentTool:
             confirmada = self._service.confirm_appointment(reservada.appointment_id)
         except AppointmentServiceError as exc:
             return ToolResult(success=False, error=f"reservado pero no confirmado: {exc}")
-        return ToolResult(success=True, data=confirmada.model_dump(mode="json"))
+        # Recado 054/058 — `confirm_appointment` es una RELECTURA contra
+        # hrmm-backend (ver `HrmmAppointmentService.confirm_appointment`)
+        # que no sabe nada de `correo_confirmacion_enviado` (anotación
+        # puramente del lado de ZANTIA, nunca almacenada en hrmm-backend)
+        # — sin este merge, el resultado de `book_appointment` (que SÍ
+        # intentó el envío real) se perdía en silencio al sobreescribirse
+        # con la relectura.
+        datos_finales = confirmada.model_copy(
+            update={"correo_confirmacion_enviado": reservada.correo_confirmacion_enviado}
+        )
+        return ToolResult(success=True, data=datos_finales.model_dump(mode="json"))
 
 
 class RescheduleAppointmentTool:

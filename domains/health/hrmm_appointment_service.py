@@ -27,6 +27,7 @@ documento de identidad real del paciente — resuelto antes de operar
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Any, Dict, List, Optional
@@ -35,6 +36,8 @@ from .appointment_service import AppointmentNotFoundError, AppointmentServiceErr
 from .hrmm_catalog import CatalogMirror
 from .hrmm_http import HttpClient, HttpError
 from .models import Appointment, AppointmentStatus, AvailabilitySlot
+
+logger = logging.getLogger("zantia.health")
 
 # PENDIENTE DE VALIDACIÓN (sigue siendo INFERENCIA, no confirmada):
 # el código fuente tipa `Cita.estado` como `str` libre, sin enum
@@ -199,7 +202,9 @@ class HrmmAppointmentService:
             )
         return resultado
 
-    def book_appointment(self, slot_id: str, patient_reference: str, idempotency_key: str) -> Appointment:
+    def book_appointment(
+        self, slot_id: str, patient_reference: str, idempotency_key: str, correo: Optional[str] = None
+    ) -> Appointment:
         with self._lock:
             if idempotency_key in self._idempotencia:
                 return self._reconstruir_appointment(self._idempotencia[idempotency_key])
@@ -245,7 +250,17 @@ class HrmmAppointmentService:
         cita = respuesta.body
         with self._lock:
             self._idempotencia[idempotency_key] = cita["cita_id"]
-        return self._cita_a_appointment(cita)
+        creada = self._cita_a_appointment(cita)
+        # Recado 054/058 — hallazgo real: `POST /api/agenda/citas` NUNCA
+        # dispara ningún correo por sí solo (confirmado leyendo el
+        # código real de hrmm-backend) — enviar la confirmación es
+        # SIEMPRE un segundo paso explícito y separado
+        # (`enviar_confirmacion_email`, abajo). `correo` explícito tiene
+        # prioridad; si no se pasó, se usa el que ya estuviera cacheado
+        # por `register_patient_contact` (nunca se inventa uno).
+        correo_efectivo = correo or contacto.get("correo")
+        enviado = self._intentar_enviar_confirmacion(creada.appointment_id, correo_efectivo)
+        return creada.model_copy(update={"correo_confirmacion_enviado": enviado})
 
     def confirm_appointment(self, appointment_id: str) -> Appointment:
         """hrmm-backend confirma la cita de forma atómica dentro del
@@ -337,7 +352,9 @@ class HrmmAppointmentService:
             return False
         raise AppointmentServiceError(f"verificacion/confirmar respondió {respuesta.status}: {respuesta.body}")
 
-    def cancel_appointment_verified(self, appointment_id: str, documento_paciente: str, codigo: str) -> Appointment:
+    def cancel_appointment_verified(
+        self, appointment_id: str, documento_paciente: str, codigo: str, correo: Optional[str] = None
+    ) -> Appointment:
         respuesta = self._http.request(
             "POST",
             f"/api/agenda/citas/{appointment_id}/cancelar",
@@ -350,10 +367,23 @@ class HrmmAppointmentService:
             raise AppointmentNotFoundError(appointment_id)
         if respuesta.status != 200:
             raise AppointmentServiceError(f"cancelar respondió {respuesta.status}: {respuesta.body}")
-        return self._cita_a_appointment(respuesta.body)
+        cancelada = self._cita_a_appointment(respuesta.body)
+        # Recado 054/058 — mismo hallazgo que book_appointment: cancelar
+        # (vía el endpoint de canal de confianza que ZANTIA usa) NUNCA
+        # dispara ningún correo por sí solo — confirmado leyendo el
+        # código real de hrmm-backend (`cancelar_cita`, backend/app/api/
+        # agenda.py, nunca llama a `_enviar_correo_notificacion`; ese
+        # helper solo lo usan los endpoints del portal público). El
+        # mismo endpoint genérico `enviar-confirmacion` sirve para los 3
+        # casos (reservar/cancelar/reprogramar) — el lado de n8n elige
+        # la plantilla mirando el estado REAL de la cita, no un
+        # parámetro que ZANTIA tenga que decidir.
+        enviado = self._intentar_enviar_confirmacion(appointment_id, correo)
+        return cancelada.model_copy(update={"correo_confirmacion_enviado": enviado})
 
     def reschedule_appointment_verified(
-        self, appointment_id: str, new_slot_id: str, documento_paciente: str, codigo: str
+        self, appointment_id: str, new_slot_id: str, documento_paciente: str, codigo: str,
+        correo: Optional[str] = None,
     ) -> Appointment:
         respuesta = self._http.request(
             "POST",
@@ -369,7 +399,61 @@ class HrmmAppointmentService:
             raise SlotNotAvailableError(new_slot_id)
         if respuesta.status != 200:
             raise AppointmentServiceError(f"reprogramar respondió {respuesta.status}: {respuesta.body}")
-        return self._cita_a_appointment(respuesta.body)
+        reprogramada = self._cita_a_appointment(respuesta.body)
+        # Recado 054/058 — mismo hallazgo, ver cancel_appointment_verified arriba.
+        enviado = self._intentar_enviar_confirmacion(appointment_id, correo)
+        return reprogramada.model_copy(update={"correo_confirmacion_enviado": enviado})
+
+    # ------------------------------------------------------------------
+    # Correo de confirmación real (recado 054/058) — SIEMPRE un segundo
+    # paso explícito, nunca disparado automáticamente por hrmm-backend
+    # al reservar/cancelar/reprogramar (ver docstring de book_appointment).
+    # ------------------------------------------------------------------
+    def enviar_confirmacion_email(self, appointment_id: str, correo: str) -> Dict[str, Any]:
+        """POST /api/agenda/citas/{id}/enviar-confirmacion — intermediario
+        hacia el webhook real de n8n que envía el correo (confirmado
+        real y probado muchas veces desde el propio portal de citas,
+        ver docs/progreso.md del repo hrmm). Público (solo rate-limited,
+        sin `X-Backend-Secret`) — el mismo endpoint que usa el botón
+        "Enviar por correo" del portal público, confirmado leyendo
+        `backend/app/api/agenda.py:enviar_confirmacion` (repo hrmm, solo
+        lectura)."""
+        respuesta = self._http.request(
+            "POST",
+            f"/api/agenda/citas/{appointment_id}/enviar-confirmacion",
+            json_body={"email": correo},
+        )
+        if respuesta.status != 200:
+            raise AppointmentServiceError(
+                f"enviar-confirmacion respondió {respuesta.status}: {respuesta.body}"
+            )
+        return respuesta.body  # {"exito": bool, "estado": str, "mensaje": str}
+
+    def _intentar_enviar_confirmacion(self, appointment_id: str, correo: Optional[str]) -> Optional[bool]:
+        """Best-effort — NUNCA revierte ni rompe la acción principal
+        (reservar/cancelar/reprogramar) ya exitosa, que quedó bien
+        hecha independientemente de esto (recado 058, requisito #3: un
+        fallo aquí se registra, nunca se expone como error al
+        paciente). Devuelve `None` si no había ningún correo disponible
+        para intentar (nunca se hizo ninguna llamada de red — distinto
+        de "se intentó y falló", `False`) — `True` solo si hrmm-backend
+        confirmó el envío real."""
+        if not correo:
+            return None
+        try:
+            resultado = self.enviar_confirmacion_email(appointment_id, correo)
+        except AppointmentServiceError as exc:
+            logger.warning(
+                "No se pudo enviar el correo de confirmación real para %s: %s", appointment_id, exc
+            )
+            return False
+        exito = bool(resultado.get("exito"))
+        if not exito:
+            logger.warning(
+                "hrmm-backend no confirmó el envío del correo de confirmación para %s: %r",
+                appointment_id, resultado,
+            )
+        return exito
 
     # ------------------------------------------------------------------
     def _cita_a_appointment(self, cita: Dict[str, Any]) -> Appointment:

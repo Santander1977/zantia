@@ -36,6 +36,7 @@ from memory.conversation_memory import Turn
 from state.models import ConversationState
 
 from .appointment_service import AppointmentService
+from .models import respuesta_pregunta_sobre_correo
 
 # Normalización de tildes — NUNCA toca "ñ" ("año"/"ano" son palabras
 # distintas, eso no es lo que se está corrigiendo aquí). Bug real de
@@ -152,6 +153,79 @@ _CONSULTA_CITAS_EXISTENTES = (
     "consultar mi cita", "consultar mis citas", "qué cita tengo", "que cita tengo",
     "cuándo es mi cita", "cuando es mi cita", "tengo alguna cita", "mis citas",
 )
+# Recado 058 — hallazgo real de producción: tras una reserva exitosa
+# ("...Te enviamos un correo de confirmación con todos los detalles."),
+# el paciente preguntó "confirmame si me enviastes el email" — el
+# sistema no lo reconoció como una pregunta sobre la acción recién
+# hecha y cayó al saludo corto (recado 057) + directo a preguntar
+# servicio, arrancando una reserva nueva sin que el paciente la
+# pidiera. Incluye la variante real "enviastes" (typo coloquial común
+# en español, sin conjugación correcta) además de la forma correcta
+# "enviaste" — mismo criterio de palabras clave del resto del archivo.
+_PREGUNTA_SOBRE_CORREO_ENVIADO = (
+    "me enviaste el correo", "me enviastes el correo", "me enviaste el email", "me enviastes el email",
+    "enviaste el correo", "enviastes el correo", "enviaste el email", "enviastes el email",
+    "llego el correo", "llego el email", "me llego el correo", "me llego el email", "me llego el mail",
+    "recibi el correo", "recibi el email",
+    "confirmame si me enviaste", "confirmame si me enviastes", "confirmame si me llego",
+)
+# Recado 058 — hallazgo real de producción: "no gracias ya termine"
+# (una despedida real y clara) se interpretó como un intento de nombrar
+# un servicio, quedando atascado pidiendo "el nombre tal como aparece
+# en la lista". Frases deliberadamente de 3+ palabras (nunca solas como
+# "gracias" o "listo") para evitar falsos positivos sobre un mensaje
+# que solo agradece de paso sin querer cerrar la conversación. Se
+# compara sobre texto SIN puntuación (`_es_despedida`, abajo) — a
+# diferencia del resto de las listas de este archivo, una despedida
+# real casi siempre trae comas ("no gracias, ya terminé").
+#
+# Ampliada (mensaje urgente posterior al 058, transcripción real de
+# 6+ turnos): "chao"/"chau"/"adios" SÍ se agregan como palabras SUELTAS
+# (únicas excepciones a la regla de "3+ palabras" de arriba) — a
+# diferencia de "gracias"/"listo", una despedida coloquial en español
+# no necesita ningún acompañamiento para ser inequívoca ("Chao" solo,
+# como mensaje completo, es 100% una despedida real, nunca un typo de
+# otra cosa). Deliberadamente NO se agrega "salir"/"terminar" sueltos
+# acá: esos SÍ tienen falsos positivos reales dentro de una conversación
+# en curso ("quiero terminar de agendar" significa seguir, no cerrar) —
+# esas dos palabras se reconocen en cambio SOLO como la 5ta opción del
+# menú (`_MENU_OPCIONES`/`_interpretar_opcion_menu` en gateway.py), un
+# contexto sin esa ambigüedad. "q(ue) tengas buen(a) ..." (día/tarde/
+# noche) es una construcción de despedida distinta que ninguna frase
+# anterior cubría — se agrega en ambas variantes (con/sin la abreviatura
+# real "q" en vez de "que", typo coloquial de Telegram, mismo criterio
+# que "enviastes" arriba).
+_DESPEDIDA = (
+    "no gracias ya termine", "ya termine", "eso es todo", "eso seria todo", "eso seria todo gracias",
+    "nada mas por ahora", "nada mas gracias", "listo gracias", "listo asi esta bien", "asi esta bien",
+    "no necesito nada mas", "ya no necesito mas", "gracias ya no necesito mas",
+    "muchas gracias eso es todo", "eso es todo gracias", "eso era todo",
+    "chao", "chau", "adios",
+    "que tengas buen", "q tengas buen",
+)
+_RE_PUNTUACION_DESPEDIDA = re.compile(r"[¡!¿?.,;:]")
+
+
+def _es_despedida(texto: str) -> bool:
+    """`_DESPEDIDA` compara sobre texto SIN puntuación — quita comas y
+    signos ANTES de buscar, para que "no gracias, ya terminé" (coma
+    real, natural en una despedida) siga matcheando "no gracias ya
+    termine"."""
+    limpio = _RE_PUNTUACION_DESPEDIDA.sub(" ", texto)
+    limpio = " ".join(limpio.split())
+    return _contains_any_sin_tildes(limpio, _DESPEDIDA)
+
+
+# Extraído a su propia función (mensaje urgente posterior al 058) para
+# que `gateway.py` pueda mostrar EXACTAMENTE la misma despedida cálida
+# cuando el paciente sale por la 5ta opción del menú numerado (sin
+# conversación abierta todavía, ver `_resolver_por_intent` en
+# gateway.py) — una única fuente de verdad para el texto, en vez de
+# copiarlo literal en dos archivos (mismo criterio de import ya
+# establecido para `_lista_numerada`/`_formatear_fecha_humana`).
+def _texto_despedida(nombre: Optional[str]) -> str:
+    despedida = f"¡Con gusto, {nombre}!" if nombre else "¡Con gusto!"
+    return f"{despedida} Que tengas buen día. Aquí estaré si necesitas algo más."
 # Recado 053, Parte 3 — pedido explícito del usuario: un mensaje
 # emocional/personal real ("me deprime ir al médico", "estoy
 # deprimido/a", "esto me tiene angustiada") NO es lo mismo que un typo o
@@ -646,7 +720,9 @@ class HealthBrain:
         # para no reinterrumpir un wizard que ya está resolviendo una
         # interrupción anterior.
         if etapa not in _ETAPAS_SIN_INTERRUPCION_DE_CONTEXTO:
-            interrupcion = self._detectar_interrupcion_de_contexto(texto, datos, etapa)
+            interrupcion = self._detectar_interrupcion_de_contexto(
+                texto, datos, etapa, state.resultado_de_herramientas
+            )
             if interrupcion is not None:
                 return interrupcion
 
@@ -703,7 +779,11 @@ class HealthBrain:
 
     # ------------------------------------------------------------------
     def _detectar_interrupcion_de_contexto(
-        self, texto: str, datos: Dict[str, Any], etapa_actual: str
+        self,
+        texto: str,
+        datos: Dict[str, Any],
+        etapa_actual: str,
+        resultado_de_herramientas: Optional[Dict[str, Any]] = None,
     ) -> Optional[BrainOutput]:
         """Recado 047 — extraído de `_interpretar_decision` (donde antes
         vivían, solo alcanzables desde la etapa "esperando_decision") para
@@ -717,7 +797,20 @@ class HealthBrain:
         Mismo orden de prioridad que tenía `_interpretar_decision` (recado
         030): info no autorizada, humano, no puede ahora, pide info,
         beneficiario — antes de que la etapa específica interprete el
-        mensaje a su manera."""
+        mensaje a su manera.
+
+        `resultado_de_herramientas` (recado 054, agregado a la firma tras
+        el 058): el mismo dict acumulativo de `ConversationState` — se
+        usa SOLO en la rama "pregunta sobre correo enviado" para
+        responder con el estado REAL del último intento de envío
+        (`Appointment.correo_confirmacion_enviado`), nunca con una
+        promesa genérica. Default `None` (tratado como `{}`) porque el
+        llamador de `gateway.py:_evaluar_ventana_de_gracia` reevalúa este
+        método sobre una Activity YA CERRADA leyendo el `ConversationState`
+        persistido — que sí tiene el campo, así que en la práctica
+        siempre se pasa; el default solo cubre una llamada directa desde
+        un test que no lo necesite."""
+        resultado_de_herramientas = resultado_de_herramientas or {}
         if _contains_any(texto, _INFO_NO_AUTORIZADA):
             return BrainOutput(
                 senales_detectadas=["informacion_no_autorizada"],
@@ -845,6 +938,58 @@ class HealthBrain:
                 respuesta_propuesta=respuesta,
                 proxima_accion_propuesta="preguntar_intencion",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+            )
+
+        # Recado 058 — pregunta sobre una acción que el sistema ACABA de
+        # decir que hizo (hoy, específicamente el correo de confirmación
+        # — la única promesa de acción que `agent.py`/`gateway.py`
+        # concatenan tras reservar/cancelar/reprogramar, ver recado
+        # 054). Respuesta HONESTA basada en el estado REAL: desde que el
+        # recado 054 conectó el envío real (`HrmmAppointmentService.
+        # enviar_confirmacion_email`), `resultado_de_herramientas` trae
+        # el resultado verdadero del ÚLTIMO intento (`book_appointment`
+        # es el único tool WRITE que hoy pasa por `interpret()` con este
+        # dato disponible — cancelar/reprogramar viven enteramente en
+        # `gateway.py`, fuera de este método, ver `_procesar_intento_de_codigo`).
+        # `respuesta_pregunta_sobre_correo` (models.py) ya devuelve el
+        # texto correcto para los 3 casos (enviado/fallido/nunca
+        # intentado) — nunca se reafirma una promesa como hecho
+        # confirmado sin evidencia, mismo principio que
+        # `NoPrometerContactoGuardrail`. `etapa` no cambia — el paciente
+        # sigue disponible para lo que diga después (despedirse, pedir
+        # algo nuevo), nunca se reinicia el flujo ni se pregunta servicio.
+        if _contains_any_sin_tildes(texto, _PREGUNTA_SOBRE_CORREO_ENVIADO):
+            correo_confirmacion_enviado = (
+                resultado_de_herramientas.get("book_appointment", {}) or {}
+            ).get("correo_confirmacion_enviado")
+            return BrainOutput(
+                senales_detectadas=["pregunta_sobre_correo_enviado"],
+                respuesta_propuesta=respuesta_pregunta_sobre_correo(correo_confirmacion_enviado),
+                proxima_accion_propuesta="preguntar_intencion",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+            )
+
+        # Recado 058 — despedida/cierre de conversación explícito ("no
+        # gracias ya termine") reconocido en CUALQUIER etapa — antes se
+        # interpretaba como un intento de nombrar un servicio (si
+        # ocurría en "esperando_servicio") o caía al fallback genérico
+        # de sí/no en cualquier otra etapa, nunca como lo que
+        # genuinamente es: el paciente dando la conversación por
+        # terminada. Reutiliza el MISMO mecanismo ya existente de
+        # "declinar" (`_es_negativo` en `_interpretar_decision`,
+        # `datos["decision"] = "DECLINED"` -> `agent.py:
+        # _sincronizar_activity` -> `ManagementStatus.DECLINED` ->
+        # `gateway.py:_cerrar_si_definitivo` cierra la Activity de
+        # verdad) — nunca un mecanismo nuevo y paralelo sin sincronizar
+        # (lección explícita del recado 057: código duplicado sin
+        # sincronizar es la fuente real de bugs de esta serie).
+        if _es_despedida(texto):
+            nuevos = {**datos, "etapa": "finalizada", "decision": "DECLINED"}
+            nombre = (self._activity.patient_contact or {}).get("nombre")
+            return BrainOutput(
+                senales_detectadas=["despedida_reconocida"],
+                respuesta_propuesta=_texto_despedida(nombre),
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
 
         # Recado 053, Parte 3 — expresión emocional/personal real ("me
