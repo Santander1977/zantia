@@ -221,6 +221,19 @@ _VARIANTES_SERVICIO_AMBIGUO = (
     "Creo que podrías referirte a más de uno de estos: {opciones}. ¿Cuál de los dos es el que necesitas?",
     "No quiero adivinar entre estos: {opciones}. ¿Me confirmas cuál de los dos prefieres?",
 )
+# Ambigüedad genuina de fecha/horario (recado 051, mismo criterio que
+# `_VARIANTES_SERVICIO_AMBIGUO` arriba) — el paciente escribió un día de
+# la semana o un número de día/hora que coincide con MÁS DE UNA de las
+# opciones ofrecidas (ej. dos fechas ofrecidas caen el mismo día de la
+# semana en semanas distintas). Nunca se elige por el paciente.
+_VARIANTES_FECHA_AMBIGUA = (
+    "Creo que podrías referirte a más de una de estas fechas: {opciones}. ¿Cuál de las dos prefieres?",
+    "No quiero adivinar entre estas fechas: {opciones}. ¿Me confirmas cuál de las dos es?",
+)
+_VARIANTES_HORARIO_AMBIGUO = (
+    "Creo que podrías referirte a más de uno de estos horarios: {opciones}. ¿Cuál de los dos prefieres?",
+    "No quiero adivinar entre estos horarios: {opciones}. ¿Me confirmas cuál de los dos es?",
+)
 
 # Nombres en español para formatear una fecha real ("2026-09-07") de
 # forma legible ("Lunes 7 de septiembre") — recado 035, Paso 2 del
@@ -246,6 +259,165 @@ def _formatear_fecha_humana(fecha_iso: str) -> str:
     except ValueError:
         return fecha_iso
     return f"{_DIAS_SEMANA[fecha.weekday()]} {fecha.day} de {_MESES[fecha.month - 1]}"
+
+
+# Reconocimiento flexible de fecha/horario (recado 051, pedido explícito
+# del usuario, mismo principio que la tolerancia a errores de tipeo de
+# servicio del recado 036): antes de esto, `_interpretar_fecha`/
+# `_interpretar_horario` SOLO reconocían el ordinal de la opción
+# ("1"/"primera") — un paciente real que repitiera la fecha/hora TAL
+# CUAL se la mostraron ("7 de septiembre", "el lunes", "lunes 7", "7
+# am") se quedaba sin poder avanzar (bug real confirmado en producción,
+# ver recado 051). `_elegir_opcion` (el matching por ordinal) sigue
+# intacto y se sigue probando SIEMPRE primero — estas funciones nuevas
+# son un fallback adicional, nunca lo reemplazan.
+#
+# Mismo criterio de "palabras clave, no NLU real" que el resto del
+# archivo (`.ai/RISKS.md` R-13): se arma un puñado de formas de texto
+# aceptadas por CADA opción real ofrecida (nunca inventadas — siempre
+# derivadas de la fecha/hora real que ya se le mostró al paciente) y se
+# busca cuál(es) de las opciones ofrecidas coincide con el texto libre.
+# Dos niveles de especificidad, del más seguro al más laxo — se detiene
+# en el PRIMER nivel que produzca algún candidato (1 = match claro, 2+ =
+# ambigüedad genuina, nunca se sigue probando niveles más laxos "por si
+# acaso" una vez que un nivel ya produjo candidatos):
+#   Nivel 1 (fecha): día del mes + (nombre del mes O día de la semana) —
+#     cubre "7 de septiembre", "lunes 7", "lunes 7 de septiembre", "día
+#     7 de septiembre". Estructuralmente casi imposible de ambigüar
+#     entre las fechas realmente ofrecidas (nunca hay dos fechas reales
+#     con el mismo día+mes).
+#   Nivel 2 (fecha): día de la semana solo ("lunes") o día del mes solo
+#     ("7", "el 7", "día 7") — más laxo, sí puede colisionar si dos
+#     fechas ofrecidas cayeran el mismo día de semana o el mismo número
+#     de día en meses distintos (raro con la ventana real de hoy, pero
+#     posible con una ventana más larga — recado 050 extendió la
+#     disponibilidad de prueba a 90 días).
+# Mismos dos niveles para horario, con "hora:minuto"/"hora am/pm" como
+# nivel 1 y "hora sola" ("7") como nivel 2.
+_RE_PALABRA = r"\b{}\b"
+
+
+def _dia_semana_normalizado(fecha_iso: str) -> Optional[str]:
+    try:
+        fecha = datetime.strptime(fecha_iso, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return _sin_tildes(_DIAS_SEMANA[fecha.weekday()]).lower()
+
+
+def _mes_normalizado(fecha_iso: str) -> Optional[str]:
+    try:
+        fecha = datetime.strptime(fecha_iso, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return _sin_tildes(_MESES[fecha.month - 1]).lower()
+
+
+def _dia_del_mes(fecha_iso: str) -> Optional[str]:
+    try:
+        fecha = datetime.strptime(fecha_iso, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return str(datetime.strptime(fecha_iso, "%Y-%m-%d").day)
+
+
+def _fecha_coincide_nivel1(texto_normalizado: str, fecha_iso: str) -> bool:
+    """Día del mes + (mes o día de semana) — "7 de septiembre", "lunes
+    7", "lunes 7 de septiembre"."""
+    dia = _dia_del_mes(fecha_iso)
+    if dia is None or not re.search(_RE_PALABRA.format(re.escape(dia)), texto_normalizado):
+        return False
+    mes = _mes_normalizado(fecha_iso)
+    dia_semana = _dia_semana_normalizado(fecha_iso)
+    tiene_mes = bool(mes) and mes in texto_normalizado
+    tiene_dia_semana = bool(dia_semana) and re.search(_RE_PALABRA.format(re.escape(dia_semana)), texto_normalizado)
+    return tiene_mes or bool(tiene_dia_semana)
+
+
+def _fecha_coincide_nivel2(texto_normalizado: str, fecha_iso: str) -> bool:
+    """Día de la semana solo, o día del mes solo."""
+    dia_semana = _dia_semana_normalizado(fecha_iso)
+    if dia_semana and re.search(_RE_PALABRA.format(re.escape(dia_semana)), texto_normalizado):
+        return True
+    dia = _dia_del_mes(fecha_iso)
+    return bool(dia) and bool(re.search(_RE_PALABRA.format(re.escape(dia)), texto_normalizado))
+
+
+def _emparejar_fecha_por_texto(texto: str, fechas: List[str]) -> Tuple[Optional[str], List[str]]:
+    """Devuelve `(fecha_elegida, candidatos_ambiguos)` — mismo contrato
+    que `_emparejar_servicio_por_similitud`: un único candidato ->
+    `(fecha, [])`; dos o más (ambigüedad genuina) -> `(None,
+    [fechas...])`; ninguno -> `(None, [])`."""
+    texto_normalizado = _sin_tildes(texto).lower()
+    for nivel in (_fecha_coincide_nivel1, _fecha_coincide_nivel2):
+        candidatos = [f for f in fechas if nivel(texto_normalizado, f)]
+        if len(candidatos) == 1:
+            return candidatos[0], []
+        if len(candidatos) >= 2:
+            return None, candidatos
+    return None, []
+
+
+def _formas_hora_nivel1(hora_24: str) -> List[str]:
+    """`"07:00"` -> formas de texto con precisión de minuto/meridiano:
+    "07:00", "7:00", "7:00am", "7:00 am", "7 am", "7am", "7 de la
+    mañana" (sin tilde ya en el resultado, comparado contra texto sin
+    tilde). Nunca incluye la hora sola sin ningún otro dato (eso es
+    nivel 2, más laxo)."""
+    try:
+        hh_str, mm_str = hora_24.split(":")
+        hh, mm = int(hh_str), int(mm_str)
+    except (ValueError, AttributeError):
+        return [hora_24.lower()]
+    hh12 = hh % 12 or 12
+    meridiano = "am" if hh < 12 else "pm"
+    periodo_idiomatico = "de la manana" if hh < 12 else ("de la tarde" if hh < 19 else "de la noche")
+    formas = [
+        hora_24.lower(),
+        f"{hh}:{mm:02d}",
+        f"{hh12}:{mm:02d}{meridiano}",
+        f"{hh12}:{mm:02d} {meridiano}",
+        f"{hh12}:{mm:02d} {periodo_idiomatico}",
+    ]
+    if mm == 0:
+        formas.extend([f"{hh12}{meridiano}", f"{hh12} {meridiano}", f"{hh12} {periodo_idiomatico}"])
+    return formas
+
+
+def _hora_solo_normalizada(hora_24: str) -> Optional[str]:
+    """La hora sola, sin minutos ni meridiano — "07:00"/"07:30" -> "7"
+    (nivel 2, más laxo — puede colisionar entre dos opciones de la
+    misma hora)."""
+    try:
+        hh_str, _ = hora_24.split(":")
+        hh = int(hh_str)
+    except (ValueError, AttributeError):
+        return None
+    hh12 = hh % 12 or 12
+    return str(hh12)
+
+
+def _horario_coincide_nivel1(texto_normalizado: str, hora_24: str) -> bool:
+    return any(forma in texto_normalizado for forma in _formas_hora_nivel1(hora_24))
+
+
+def _horario_coincide_nivel2(texto_normalizado: str, hora_24: str) -> bool:
+    hora_sola = _hora_solo_normalizada(hora_24)
+    return bool(hora_sola) and bool(re.search(_RE_PALABRA.format(re.escape(hora_sola)), texto_normalizado))
+
+
+def _emparejar_horario_por_texto(texto: str, horas: List[str]) -> Tuple[Optional[str], List[str]]:
+    """Mismo contrato que `_emparejar_fecha_por_texto`, sobre la lista
+    de horas REALES ya ofrecidas (`datos["horas_ofrecidas"]`, paralela a
+    `datos["opciones_horario"]` por índice)."""
+    texto_normalizado = _sin_tildes(texto).lower()
+    for nivel in (_horario_coincide_nivel1, _horario_coincide_nivel2):
+        candidatos = [h for h in horas if nivel(texto_normalizado, h)]
+        if len(candidatos) == 1:
+            return candidatos[0], []
+        if len(candidatos) >= 2:
+            return None, candidatos
+    return None, []
 
 
 # Tolerancia a errores de tipeo al elegir un servicio por nombre libre
@@ -785,17 +957,32 @@ class HealthBrain:
 
     def _interpretar_fecha(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
         """PASO 2 (respuesta) — el paciente elige una de las fechas ya
-        ofrecidas (ordinal, mismo mecanismo que el resto del archivo,
-        `_elegir_opcion`). Nunca inventa ni asume la primera si no fue
-        claro."""
+        ofrecidas. Primero por ordinal (`_elegir_opcion`, mecanismo de
+        siempre, sin cambios); si no matchea, por texto libre (recado
+        051: día de semana, día del mes, o la fecha completa tal como
+        se mostró — `_emparejar_fecha_por_texto`). Nunca inventa ni
+        asume la primera si no fue claro, y nunca elige por el paciente
+        si el texto es ambiguo entre dos o más fechas reales ofrecidas."""
         fechas = datos.get("fechas_ofrecidas", [])
         elegida = self._elegir_opcion(texto, fechas)
+        candidatos_ambiguos: List[str] = []
         if elegida is None:
-            variante, nuevos = _elegir_variante(
-                _VARIANTES_FECHA_NO_IDENTIFICADA, datos, "intentos_aclaracion_fecha"
-            )
+            elegida, candidatos_ambiguos = _emparejar_fecha_por_texto(texto, fechas)
+        if elegida is None:
+            nuevos = datos
+            if candidatos_ambiguos:
+                texto_candidatos = "; ".join(_formatear_fecha_humana(f) for f in candidatos_ambiguos)
+                variante, nuevos = _elegir_variante(
+                    _VARIANTES_FECHA_AMBIGUA, datos, "intentos_aclaracion_fecha_ambigua"
+                )
+                respuesta = variante.format(opciones=texto_candidatos)
+            else:
+                variante, nuevos = _elegir_variante(
+                    _VARIANTES_FECHA_NO_IDENTIFICADA, datos, "intentos_aclaracion_fecha"
+                )
+                respuesta = variante
             return BrainOutput(
-                respuesta_propuesta=variante,
+                respuesta_propuesta=respuesta,
                 proxima_accion_propuesta="preguntar_dato_faltante",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
@@ -820,6 +1007,12 @@ class HealthBrain:
             **datos,
             "etapa": "esperando_horario",
             "opciones_horario": [o.slot_id for o in opciones],
+            # Paralela a "opciones_horario" por índice (recado 051) — la
+            # hora REAL tal como se le mostró al paciente, para poder
+            # reconocerla si la repite en texto libre en vez de un
+            # ordinal (_emparejar_horario_por_texto). Nunca se usa para
+            # nada más que comparar contra el texto de la respuesta.
+            "horas_ofrecidas": [o.time for o in opciones],
         }
         texto_horarios = "; ".join(f"{i+1}) {o.time} en {o.location}" for i, o in enumerate(opciones))
         fecha_legible = _formatear_fecha_humana(fecha)
@@ -839,15 +1032,35 @@ class HealthBrain:
         `_interpretar_seleccion` (recados 013/027) — misma lógica de
         reserva (beneficiario, nombre, idempotencia), solo que el
         `slot_id` ya viene acotado a servicio+fecha, no a una lista
-        combinada."""
+        combinada. Primero por ordinal (`_elegir_opcion`, sin cambios);
+        si no matchea, por texto libre (recado 051: la hora tal como se
+        mostró, o solo la hora sin minutos/meridiano —
+        `_emparejar_horario_por_texto` sobre `datos["horas_ofrecidas"]`,
+        paralela a `opciones_horario` por índice — nunca se elige por
+        el paciente si el texto es ambiguo entre dos horarios reales)."""
         opciones = datos.get("opciones_horario", [])
+        horas = datos.get("horas_ofrecidas", [])
         elegida = self._elegir_opcion(texto, opciones)
+        candidatos_ambiguos: List[str] = []
+        if elegida is None and horas:
+            hora_elegida, candidatos_ambiguos = _emparejar_horario_por_texto(texto, horas)
+            if hora_elegida is not None:
+                elegida = opciones[horas.index(hora_elegida)]
         if elegida is None:
-            variante, nuevos = _elegir_variante(
-                _VARIANTES_SELECCION_NO_IDENTIFICADA, datos, "intentos_aclaracion_seleccion"
-            )
+            nuevos = datos
+            if candidatos_ambiguos:
+                texto_candidatos = "; ".join(candidatos_ambiguos)
+                variante, nuevos = _elegir_variante(
+                    _VARIANTES_HORARIO_AMBIGUO, datos, "intentos_aclaracion_horario_ambiguo"
+                )
+                respuesta = variante.format(opciones=texto_candidatos)
+            else:
+                variante, nuevos = _elegir_variante(
+                    _VARIANTES_SELECCION_NO_IDENTIFICADA, datos, "intentos_aclaracion_seleccion"
+                )
+                respuesta = variante
             return BrainOutput(
-                respuesta_propuesta=variante,
+                respuesta_propuesta=respuesta,
                 proxima_accion_propuesta="preguntar_dato_faltante",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
