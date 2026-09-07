@@ -24,9 +24,12 @@ patient_reference (003, principio 12: el Core es agnóstico de dominio).
 """
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 from observability.events import EventType
 
@@ -35,6 +38,7 @@ from .agent import HealthAgentContext, build_health_agent_context, handle_patien
 from .appointment_service import AppointmentService, AppointmentStatus
 from .confirmation import ConfirmationTracker
 from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
+from .intent import _sin_tildes as _sin_tildes_menu
 from .intent import classify_intent
 from .models import Activity, ActivityStatus, PatientRequest, RequestIntent, RequestStatus
 from .patient_request_source import MockPatientRequestSource, PatientRequestSource
@@ -70,6 +74,162 @@ _MENSAJE_INFORMACION_GENERICA = (
     "¡Claro! Puedo ayudarte a programar, reprogramar, cancelar o consultar una cita. "
     "¿Qué necesitas?"
 )
+
+# Saludo institucional de primer contacto (recado 046, pedido explícito
+# del usuario): guion FIJO, construido enteramente en este archivo
+# (gateway.py) — nunca pasa por `HealthBrain.interpret()`/
+# `HealthAnthropicBrain` en absoluto, así que es estructuralmente
+# imposible que el LLM lo redacte o altere, aunque `HEALTH_BRAIN_TYPE=llm`
+# esté activo (se concatena AFUERA de cualquier llamada al Brain — ver
+# `handle_inbound_message`). No hizo falta reforzar el prompt de
+# sistema del LLM para "proteger" este texto: nunca se le muestra.
+_PRESENTACION_ANDRES = (
+    "Soy Andrés, tu asistente virtual para la gestión de tus citas médicas "
+    "del Hospital Regional del Magdalena Medio."
+)
+
+
+def _saludo_segun_hora_bogota(ahora: Optional[datetime] = None) -> str:
+    """Franja horaria real del servidor, SIEMPRE en zona horaria
+    America/Bogota (pedido explícito — el proceso puede correr en
+    cualquier zona horaria de infraestructura, ej. UTC en EasyPanel).
+    Convención elegida (no hay un estándar único en español, se
+    documenta la elegida): 05:00-11:59 "Buenos días", 12:00-18:59
+    "Buenas tardes", el resto "Buenas noches". `zoneinfo` es de la
+    librería estándar (sin dependencia nueva) — confirmado con una
+    prueba real dentro del contenedor Docker real (recado 046) que la
+    base de datos de zonas horarias SÍ está disponible en la imagen
+    `python:3.11-slim` usada por este proyecto, sin necesitar el
+    paquete `tzdata` adicional.
+
+    `ahora` es un punto de inyección SOLO para tests (permite fijar una
+    hora exacta sin depender del reloj real de la máquina que corre la
+    suite) — en uso real siempre se omite y se usa la hora real."""
+    momento = ahora if ahora is not None else datetime.now(ZoneInfo("America/Bogota"))
+    hora = momento.hour
+    if 5 <= hora < 12:
+        return "Buenos días"
+    if 12 <= hora < 19:
+        return "Buenas tardes"
+    return "Buenas noches"
+
+
+def _tratamiento_formal(nombre: str) -> str:
+    """Heurística SIMPLE y declaradamente imperfecta (decisión explícita
+    del recado 046, pedido del usuario de "decidir y documentar"):
+    ningún dato de género real existe hoy — ni `identity_store.py`
+    (recado 034) ni `buscar-paciente` de hrmm-backend lo capturan — así
+    que no hay ninguna fuente de verdad que consultar, solo inferir.
+    Se usa la convención mayoritaria en español (nombre termina en "a"
+    -> "señora", cualquier otro caso -> "señor") sobre el PRIMER nombre
+    ya capturado. Riesgo aceptado y documentado: falla con nombres
+    unisex o con terminaciones atípicas (ej. "Nicolás" no termina en
+    "a", correcto; pero un nombre femenino que no termine en "a" -ej.
+    "Carmen", "Soledad"- se trataría erróneamente como "señor"). No se
+    implementó ninguna forma neutra como default porque el pedido
+    explícito de tono (mismo criterio que "señor/señora" en el ejemplo
+    dado) prioriza sonar formal y personalizado sobre evitar por
+    completo el riesgo de un error ocasional — queda documentado como
+    mejora pendiente si se decide capturar una preferencia real."""
+    primer_nombre = nombre.strip().split()[0] if nombre.strip() else ""
+    return "señora" if primer_nombre.lower().endswith("a") else "señor"
+
+
+# Menú numerado de 4 opciones (recado 046, requisito explícito: SIEMPRE
+# número + palabra, nunca texto corrido) — texto FIJO, nunca redactado
+# por el LLM (misma razón que el resto de este bloque: se construye
+# aquí, jamás se le pasa a HealthBrain/HealthAnthropicBrain).
+_MENU_NUMERADO = (
+    "1. Reservar una cita\n"
+    "2. Reprogramar una cita\n"
+    "3. Cancelar una cita\n"
+    "4. Consultar mis citas"
+)
+
+# (ordinal, palabras/frases clave) -> RequestIntent — reutiliza el
+# VOCABULARIO ya existente en `intent.py` (_PROGRAMAR/_REPROGRAMAR/
+# _CANCELAR/_CONSULTAR) más las palabras sueltas típicas de una
+# respuesta a ESTE menú puntual ("reservar", "cancelar" a secas, que
+# `intent.py:classify_intent` no reconoce por sí solas porque su
+# vocabulario exige frases más largas como "cancelar mi cita" — acá SÍ
+# basta la palabra sola, porque el contexto ya es inequívoco: se le
+# acaba de mostrar un menú de 4 opciones). Deliberadamente una función
+# NUEVA, no una reutilización directa de `classify_intent` — esa
+# función SIEMPRE cae a `PROGRAMAR_CITA` por defecto si no reconoce
+# nada (correcto para un mensaje libre inicial), lo cual sería
+# INCORRECTO acá: si la respuesta al menú no se reconoce, hay que
+# volver a preguntar, nunca asumir "reservar".
+# Deliberadamente NO se incluyen aquí los tuples completos de
+# `intent.py` (`_PROGRAMAR`/`_REPROGRAMAR`/`_CANCELAR`/`_CONSULTAR`) —
+# hallazgo real al migrar los tests existentes (recado 046): esas listas
+# ya las reconoce `classify_intent` con un ORDEN DE PRIORIDAD específico
+# y ya probado (`_INFORMACION` se revisa ANTES que `_PROGRAMAR`,
+# recado 027, precisamente para que "Programar cuál servicios tienes
+# disponible" se clasifique como pregunta de catálogo, no como reserva,
+# solo por contener la palabra "programar"). Si esta función revisara
+# esas mismas listas ANTES de `classify_intent` (que es como se usa,
+# ver `_enrutar_solicitud_nueva`), se saltaría esa prioridad ya
+# establecida. Acá solo se agregan las formas BARE (palabra sola) que
+# `classify_intent` NUNCA reconocía por sí solo — "reservar"/"cancelar"/
+# "consultar" no aparecen en ninguna de sus listas — y el ordinal
+# "reprogramar" YA está en `_REPROGRAMAR` así que no hace falta
+# repetirlo aquí.
+_MENU_OPCIONES: tuple = (
+    ("1", RequestIntent.PROGRAMAR_CITA, ("reservar",)),
+    ("2", RequestIntent.REPROGRAMAR_CITA, ()),
+    ("3", RequestIntent.CANCELAR_CITA, ("cancelar",)),
+    ("4", RequestIntent.CONSULTAR_CITA, ("consultar", "consultar mis citas")),
+)
+
+
+def _interpretar_opcion_menu(texto: str) -> Optional[RequestIntent]:
+    """Acepta AMBAS formas de respuesta al menú numerado (requisito
+    explícito): el ordinal exacto ("1"-"4") o cualquiera de las
+    palabras/frases clave de esa opción, en cualquier parte del
+    mensaje (mismo criterio de `_contains_any` de `brain.py` — sin
+    tildes, para el mismo tipo de error de tipeo real ya documentado en
+    los recados 026/030). Devuelve `None` si no reconoce nada — quien
+    llama debe volver a preguntar, nunca asumir una opción por
+    default."""
+    # Límite de palabra (`\b`) en TODOS los chequeos, no solo el
+    # ordinal — hallazgo real al migrar los tests existentes (recado
+    # 046): "programar" es substring literal de "reprogramar" ("re" +
+    # "programar"), así que un `in` simple habría matcheado SIEMPRE la
+    # opción 1 (reservar) para cualquier mensaje de reprogramar. `\b`
+    # exige un límite real de palabra en ambos lados, evitando este
+    # falso positivo sin perder el resto de la tolerancia ya construida
+    # (sin tildes, en cualquier parte del mensaje).
+    texto_norm = _sin_tildes_menu(texto.strip().lower())
+    for ordinal, intent, palabras_clave in _MENU_OPCIONES:
+        if re.search(rf"\b{ordinal}\b", texto_norm):
+            return intent
+        if any(
+            re.search(rf"\b{re.escape(_sin_tildes_menu(palabra.lower()))}\b", texto_norm)
+            for palabra in palabras_clave
+        ):
+            return intent
+    return None
+
+
+def _saludo_primer_contacto(nombre_conocido: Optional[str]) -> str:
+    """Construye el guion institucional fijo de primer contacto (recado
+    046) — SIEMPRE con la franja horaria real, nunca inventada, y
+    SIEMPRE con el menú numerado de 4 opciones al final.
+
+    - Paciente YA reconocido (identidad persistida y vigente, recados
+      014/034): saludo personalizado y formal, con tratamiento
+      señor/señora + nombre real + pregunta abierta — sin repetir la
+      presentación completa ("soy Andrés..."), pero sí el menú.
+    - Paciente nuevo (sin identidad persistida todavía): saludo
+      genérico + presentación institucional completa + el mismo menú —
+      ANTES de pedir cualquier documento (se antepone al mensaje que
+      sea, incluyendo el que pide el documento de identidad, ver
+      `handle_inbound_message`)."""
+    saludo_hora = _saludo_segun_hora_bogota()
+    if nombre_conocido:
+        tratamiento = _tratamiento_formal(nombre_conocido)
+        return f"¡{saludo_hora}, {tratamiento} {nombre_conocido}! ¿Qué desea hacer hoy?\n{_MENU_NUMERADO}"
+    return f"{saludo_hora}. {_PRESENTACION_ANDRES} ¿Qué deseas hacer?\n{_MENU_NUMERADO}"
 
 
 def _resolver_consulta_catalogo(gateway: "HealthGateway", request: PatientRequest, channel: str) -> str:
@@ -379,12 +539,31 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
         and _requiere_identidad_real(gateway)
         and patient_reference not in gateway._identidad_resuelta
     ):
-        return _gestionar_identificacion(gateway, patient_reference, channel, text)
+        # Recado 046: el saludo institucional (con el menú numerado) se
+        # antepone SOLO en el primer mensaje real de la conversación —
+        # `_pending_identity` todavía no tiene entrada para este
+        # `patient_reference` en ese momento exacto (se crea DENTRO de
+        # `_gestionar_identificacion`). En los turnos siguientes del
+        # mismo wizard (reintentos de documento, código) ya existe la
+        # entrada, así que el saludo no se repite. DISEÑO NO BLOQUEANTE
+        # (decisión explícita tras encontrar que la versión bloqueante
+        # rompía 84 tests — ver recado 046): el menú es una guía visible
+        # que se antepone, nunca una pregunta que hace esperar al
+        # paciente antes de seguir con el wizard de documento.
+        es_primer_mensaje_del_wizard = patient_reference not in gateway._pending_identity
+        respuesta_identificacion = _gestionar_identificacion(gateway, patient_reference, channel, text)
+        if es_primer_mensaje_del_wizard:
+            return f"{_saludo_primer_contacto(None)} {respuesta_identificacion}"
+        return respuesta_identificacion
 
     respuesta = _enrutar_solicitud_nueva(gateway, patient_reference, channel, message_id, text)
-    if nombre_para_saludo:
-        respuesta = f"¡Hola, {nombre_para_saludo}! {respuesta}"
-    return respuesta
+    # Recado 046: guion institucional completo (saludo + menú numerado)
+    # antepuesto al primer turno real — personalizado para un paciente
+    # reconocido automáticamente, genérico para uno nuevo en un canal
+    # sin gate de identidad. Mismo criterio de "solo en el primer turno"
+    # que ya tenía el saludo anterior — este punto solo se alcanza
+    # cuando no hay conversación abierta todavía.
+    return f"{_saludo_primer_contacto(nombre_para_saludo)} {respuesta}"
 
 
 def _enrutar_solicitud_nueva(
@@ -393,8 +572,29 @@ def _enrutar_solicitud_nueva(
     """Clasifica y resuelve un mensaje SIN conversación previa abierta —
     extraído de `handle_inbound_message` (recado 034) para poder
     anteponerle un saludo con nombre cuando corresponde, sin repetir
-    esta lógica de enrutamiento en cada rama."""
-    intent = classify_intent(text)
+    esta lógica de enrutamiento en cada rama.
+
+    Recado 046 (diseño NO bloqueante, ver docstring del módulo/recado):
+    `_interpretar_opcion_menu` se prueba PRIMERO — reconoce el ordinal
+    exacto ("1"-"4") o la palabra sola de una opción del menú
+    ("reservar", "cancelar", etc.), casos que `classify_intent` NUNCA
+    reconocía por sí solo (exige frases más largas como "cancelar mi
+    cita") y siempre defaulteaba a `PROGRAMAR_CITA` sin importar cuál
+    número/palabra bare haya escrito el paciente. Estrictamente una
+    MEJORA de precisión, nunca una regresión: solo agrega
+    interpretaciones nuevas para mensajes que antes caían al default
+    incorrecto, no cambia ninguna clasificación que ya funcionaba."""
+    intent = _interpretar_opcion_menu(text) or classify_intent(text)
+    return _resolver_por_intent(gateway, patient_reference, channel, message_id, text, intent)
+
+
+def _resolver_por_intent(
+    gateway: "HealthGateway", patient_reference: str, channel: str, message_id: str, text: str,
+    intent: RequestIntent,
+) -> str:
+    """Dispatch por `RequestIntent` YA CONOCIDO — extraído de
+    `_enrutar_solicitud_nueva` (recado 046) para no duplicar la lista de
+    ramas en dos lugares."""
     request = gateway.patient_request_source.create(
         PatientRequest(
             request_id=f"REQ-{uuid.uuid4().hex[:10]}",
@@ -424,6 +624,8 @@ def _enrutar_solicitud_nueva(
     # flujo de aceptación -> disponibilidad -> reserva ya construido en
     # HealthBrain (sección "esperando_decision"), sin duplicarlo.
     return _resolver_programar_cita(gateway, request, channel, message_id, text)
+
+
 
 
 def _determinar_servicio_inicial(gateway: "HealthGateway"):

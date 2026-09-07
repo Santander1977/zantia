@@ -79,7 +79,11 @@ def test_ciclo_completo_termina_confirmado_con_nombre_del_paciente(monkeypatch):
     identity_store.marcar_verificado("chat-Enzo", "999", "Enzo")
 
     r1 = handle_inbound_message(gateway, "chat-Enzo", "telegram", "m1", "necesito una cita")
-    assert "¡hola, enzo!" in r1.lower()
+    # Recado 046: el saludo simple "¡Hola, Enzo!" del recado 034 fue
+    # reemplazado por el guion institucional completo (personalizado
+    # para un paciente ya reconocido) — se verifica el contenido
+    # esencial (tratamiento + nombre), no la frase literal vieja.
+    assert "señor enzo" in r1.lower()
     assert "fechas disponibles" in r1.lower()
 
     r1b = handle_inbound_message(gateway, "chat-Enzo", "telegram", "m1b", "1")  # elige fecha (recado 035)
@@ -100,7 +104,12 @@ def test_saludo_con_nombre_solo_para_paciente_ya_persistido(monkeypatch):
     identity_store.marcar_verificado("chat-conocido", "999", "María")
 
     respuesta = handle_inbound_message(gateway, "chat-conocido", "telegram", "m1", "qué servicios tienen")
-    assert respuesta.lower().startswith("¡hola, maría!")
+    # Recado 046: guion institucional completo — "señora María"
+    # (heurística de tratamiento, ver `_tratamiento_formal`) + menú
+    # numerado de 4 opciones.
+    assert "señora maría" in respuesta.lower()
+    assert "qué desea hacer hoy" in respuesta.lower()
+    assert "1. reservar" in respuesta.lower() and "4. consultar" in respuesta.lower()
 
 
 def test_paciente_nuevo_sigue_el_wizard_normal_sin_ningun_saludo_con_nombre(monkeypatch):
