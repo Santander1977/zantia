@@ -137,6 +137,62 @@ _OLVIDAR = (
     "elimina mi información", "elimina mi informacion", "elimina mis datos",
     "no quiero que tengas mis datos", "deja de guardar mis datos",
 )
+# Recado 053, Parte 2 — "consultar mis citas" (la opción 4 del menú
+# institucional, recado 046) solo se reconocía como enrutamiento de
+# PRIMER contacto (`gateway.py:_interpretar_opcion_menu`/`classify_
+# intent`) — nunca dentro de `HealthBrain`, así que un paciente que lo
+# escribiera a mitad de OTRO flujo (ej. atascado en "esperando_servicio")
+# nunca lo veía reconocido, quedando en loop pidiéndole el servicio de
+# nuevo (hallazgo real de producción). Mismo vocabulario que
+# `intent.py:_CONSULTAR` (deliberadamente duplicado entre capas, mismo
+# criterio ya documentado para `_SALUDOS`/`_INFORMACION` en este
+# archivo) — duck-typed sobre `appointment_service.get_patient_
+# appointments`, igual que `buscar_paciente`/`list_services`.
+_CONSULTA_CITAS_EXISTENTES = (
+    "consultar mi cita", "consultar mis citas", "qué cita tengo", "que cita tengo",
+    "cuándo es mi cita", "cuando es mi cita", "tengo alguna cita", "mis citas",
+)
+# Recado 053, Parte 3 — pedido explícito del usuario: un mensaje
+# emocional/personal real ("me deprime ir al médico", "estoy
+# deprimido/a", "esto me tiene angustiada") NO es lo mismo que un typo o
+# una palabra sin sentido — merece una respuesta breve de validación
+# humana (nunca diagnóstico ni consejo, eso sigue fuera del propósito y
+# de OpinionPersonalGuardrail, sin cambios) y volver al contexto de la
+# conversación, en vez del fallback genérico de "no te entendí" que
+# antes producía un loop real (ver `_responder_expresion_emocional`).
+# Mismo criterio de palabras clave del resto del archivo — no NLU real
+# (`.ai/RISKS.md` R-13). Deliberadamente SIN ninguna palabra de
+# `core.brain.RISK_KEYWORDS_DEMO` ("urgente"/"emergencia"/"ayuda
+# inmediata"/"muy grave") — esa detección de riesgo corre en el Core,
+# ANTES e INDEPENDIENTE del Brain, y SIEMPRE tiene prioridad absoluta
+# (`core/orchestrator.py:handle_message`, sección 6/7 del prompt
+# maestro) — un mensaje de riesgo real jamás se trata como "solo
+# emocional", sin importar el orden de chequeo aquí.
+_EXPRESION_EMOCIONAL = (
+    "me deprime", "me deprimo", "estoy deprimido", "estoy deprimida", "me siento deprimido", "me siento deprimida",
+    "estoy triste", "me siento triste", "me pone triste",
+    "me angustia", "esto me angustia", "estoy angustiado", "estoy angustiada", "me tiene angustiado", "me tiene angustiada",
+    "me siento mal", "me siento muy mal", "no tengo ánimo", "no tengo animo", "estoy agotado", "estoy agotada",
+    "me siento solo", "me siento sola", "esto me supera", "no doy más", "no doy mas",
+)
+
+# Recado 053, Parte 3 — recordatorio BREVE (nunca la presentación
+# institucional completa, ni la lista completa de opciones de nuevo —
+# solo la PREGUNTA, mismo criterio de brevedad pedido explícitamente)
+# de qué se le había preguntado al paciente, usado para volver al
+# contexto tras una expresión emocional/personal (`_responder_
+# expresion_emocional`). Deliberadamente texto FIJO, corto, por etapa —
+# no reconsulta disponibilidad real (a diferencia de `_reanudar_tras_
+# interrupcion`, pensado para RETOMAR un flujo que sí cambió de estado;
+# aquí nada cambió, solo se reconoce el mensaje y se repite la pregunta
+# vigente).
+_RECORDATORIO_BREVE_POR_ETAPA = {
+    "esperando_decision": "Volviendo a lo de antes — ¿te gustaría que te ayude a agendar tu atención?",
+    "esperando_servicio": "Volviendo a lo de antes — ¿me confirmas para cuál servicio te gustaría agendar?",
+    "esperando_fecha": "Volviendo a lo de antes — ¿cuál de las fechas que te compartí te queda mejor?",
+    "esperando_horario": "Volviendo a lo de antes — ¿cuál de los horarios que te compartí prefieres?",
+    "esperando_seleccion_reprogramacion": "Volviendo a lo de antes — ¿cuál de esas opciones para reprogramar te queda mejor?",
+}
 
 # Recado 047 — etapas que YA son, ellas mismas, parte de un wizard de
 # interrupción en curso (documento/confirmación de beneficiario): se
@@ -171,6 +227,10 @@ def _es_negativo(texto: str) -> bool:
 
 def _es_saludo(texto: str) -> bool:
     return _contains_any_sin_tildes(texto, _SALUDOS)
+
+
+def _es_expresion_emocional(texto: str) -> bool:
+    return _contains_any_sin_tildes(texto, _EXPRESION_EMOCIONAL)
 
 
 # Variantes de mensajes de aclaración/fallback (recado 034, pedido
@@ -730,7 +790,64 @@ class HealthBrain:
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
 
+        # Recado 053, Parte 2 — "consultar mis citas" reconocido en
+        # CUALQUIER etapa (antes solo funcionaba como enrutamiento de
+        # primer contacto en `gateway.py`, nunca dentro de `HealthBrain`
+        # — hallazgo real: un paciente atascado en "esperando_servicio"
+        # que escribía esto quedaba en loop). `etapa` NO cambia (mismo
+        # criterio que INFO_NO_AUTORIZADA/PIDE_INFO arriba) — el
+        # paciente sigue exactamente donde estaba después de ver sus
+        # citas reales.
+        if _contains_any_sin_tildes(texto, _CONSULTA_CITAS_EXISTENTES):
+            citas = [
+                c for c in self._appointment_service.get_patient_appointments(self._activity.patient_reference)
+                if c.status.value in ("CONFIRMED", "RESCHEDULED")
+            ]
+            if citas:
+                detalles = "; ".join(f"{c.service} el {c.date} a las {c.time} en {c.location}" for c in citas)
+                respuesta = f"Aquí tienes: {len(citas)} cita(s) activa(s): {detalles}."
+            else:
+                respuesta = "Revisé y no tienes ninguna cita activa registrada por este canal por ahora."
+            return BrainOutput(
+                senales_detectadas=["consulta_citas_existentes"],
+                respuesta_propuesta=respuesta,
+                proxima_accion_propuesta="preguntar_intencion",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+            )
+
+        # Recado 053, Parte 3 — expresión emocional/personal real ("me
+        # deprime ir al médico") reconocida como su PROPIA categoría —
+        # nunca el fallback genérico de "no te entendí" (un typo no es
+        # lo mismo que una expresión emocional real, y merece una
+        # respuesta distinta: breve validación humana, SIN diagnosticar
+        # ni aconsejar — eso sigue fuera del propósito de ZANTIA, ver
+        # `OpinionPersonalGuardrail`, sin cambios — y vuelta natural al
+        # contexto). Deliberadamente la ÚLTIMA categoría revisada aquí:
+        # si el mensaje TAMBIÉN contiene algo más específico y accionable
+        # (ej. "es para mi hija" o "cancela mi cita"), esa rama más
+        # específica gana — la validación emocional es, a propósito, la
+        # red de seguridad más genérica, no la de mayor prioridad.
+        if _es_expresion_emocional(texto):
+            return self._responder_expresion_emocional(datos, etapa_actual)
+
         return None
+
+    def _responder_expresion_emocional(self, datos: Dict[str, Any], etapa_actual: str) -> BrainOutput:
+        """Recado 053 — validación humana breve (nunca diagnóstico, nunca
+        consejo) + recordatorio BREVE de qué se le había preguntado en
+        `etapa_actual`, para volver al contexto de forma natural, sin
+        repetir la presentación institucional completa (esa vive
+        enteramente en `gateway.py`, fuera del alcance de este método) y
+        sin reiniciar ni avanzar el flujo (`etapa`/`datos` sin tocar)."""
+        recordatorio = _RECORDATORIO_BREVE_POR_ETAPA.get(
+            etapa_actual, "¿en qué te puedo ayudar?"
+        )
+        return BrainOutput(
+            senales_detectadas=["expresion_emocional_reconocida"],
+            respuesta_propuesta=f"Entiendo, y lamento que te sientas así. {recordatorio}",
+            proxima_accion_propuesta="preguntar_intencion",
+            propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+        )
 
     def _reanudar_tras_interrupcion(self, etapa_a_reanudar: str, datos: Dict[str, Any]) -> BrainOutput:
         """Recado 047 — tras resolver una interrupción que sí necesita
@@ -1262,9 +1379,21 @@ class HealthBrain:
     # etapas del recado 035 es específicamente para RESERVAR una cita
     # nueva, alcance explícito del pedido — reprogramar no se tocó).
     def _elegir_opcion(self, texto: str, opciones: List[str]) -> Optional[str]:
+        """Recado 053 — hallazgo real de producción, caso Giselle Tornay
+        (documento 22669564): "3" es substring literal de "7:30" ("7:"
+        + "3" + "0"), así que un `in` simple hacía que CUALQUIER
+        respuesta de horario/fecha que contuviera el dígito "1"/"2"/"3"
+        en cualquier posición (una hora, un día del mes) se reinterpretara
+        como ordinal — el paciente confirmó "7:30" y el sistema reservó
+        la TERCERA opción (08:00) real, no la que pidió. Mismo patrón
+        exacto que el bug real "programar"/"reprogramar" del recado 046
+        (`gateway.py:_interpretar_opcion_menu`), nunca corregido aquí.
+        `\\b...\\b` exige que el dígito sea un TOKEN propio (no parte de
+        "7:30", "13", "08:00") — sigue reconociendo "3" sola, "opción 3",
+        "la 3", exactamente igual que antes para esos casos."""
         mapa_ordinal = {"1": 0, "primera": 0, "2": 1, "segunda": 1, "3": 2, "tercera": 2}
         for clave, indice in mapa_ordinal.items():
-            if clave in texto and indice < len(opciones):
+            if re.search(_RE_PALABRA.format(re.escape(clave)), texto) and indice < len(opciones):
                 return opciones[indice]
         return None
 
