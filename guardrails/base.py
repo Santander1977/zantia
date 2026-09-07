@@ -47,6 +47,28 @@ class VerificacionDeDatos:
 
 
 @dataclass
+class VerificacionDeSeleccion:
+    """Recado 052 — mismo principio que `VerificacionDeDatos`, para el
+    mecanismo genérico de interpretación de selección asistida por LLM
+    (`core/selection.py`): declara, para ESTE turno, qué identificadores
+    de opción son REALES (`opciones_reales_ids`) y cuál terminó
+    aceptando el Brain como selección DESPUÉS de consultar un LLM
+    (`id_seleccionado_via_llm` — `None` si el LLM no se consultó este
+    turno, ej. el matching por ordinal/texto exacto ya encontró algo).
+    El Core nunca sabe qué representa cada id (una fecha, un horario,
+    lo que sea) — solo verifica pertenencia, agnóstico de dominio,
+    igual que `DatoInventadoGuardrail` verifica valores de texto.
+
+    Esta verificación es una SEGUNDA capa, independiente de la que ya
+    hace `core.selection.interpret_selection` internamente antes de
+    aceptar cualquier propuesta del LLM — mismo espíritu de
+    "nunca confiar en un solo chequeo" del resto del proyecto."""
+
+    opciones_reales_ids: List[str]
+    id_seleccionado_via_llm: Optional[str] = None
+
+
+@dataclass
 class GuardrailContext:
     """Lo que el Orchestrator le entrega a Guardrails: la propuesta
     completa del Brain, más el estado vigente (004, sección 16)."""
@@ -63,6 +85,8 @@ class GuardrailContext:
     confirmacion_estructurada_para_write: bool = False
     # Recado 039 — ver `core.brain.BrainOutput.texto_base_para_comparacion`.
     texto_base_para_comparacion: Optional[str] = None
+    # Recado 052 — ver `VerificacionDeSeleccion` arriba.
+    verificacion_de_seleccion: Optional[VerificacionDeSeleccion] = None
 
 
 @dataclass

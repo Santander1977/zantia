@@ -30,6 +30,8 @@ from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.brain import BrainOutput
+from core.selection import SelectionOption, SelectionProposer, interpret_selection
+from guardrails.base import VerificacionDeSeleccion
 from memory.conversation_memory import Turn
 from state.models import ConversationState
 
@@ -492,9 +494,26 @@ def _emparejar_servicio_por_similitud(texto: str, servicios: List[str]) -> Tuple
 
 
 class HealthBrain:
-    def __init__(self, activity_provider: Callable[[], Any], appointment_service: AppointmentService) -> None:
+    def __init__(
+        self,
+        activity_provider: Callable[[], Any],
+        appointment_service: AppointmentService,
+        selection_proposer: Optional[SelectionProposer] = None,
+    ) -> None:
         self._activity_provider = activity_provider
         self._appointment_service = appointment_service
+        # Recado 052 — colaborador OPCIONAL (default `None`, cero cambio
+        # de comportamiento/cero llamada de red para cualquier
+        # construcción existente de `HealthBrain`): mismo criterio de
+        # "duck-typing opcional" que `appointment_service.buscar_paciente`
+        # (recado 013) — cuando está presente, `_interpretar_fecha`/
+        # `_interpretar_horario` lo consultan como ÚLTIMO recurso, solo
+        # si su propio matching determinista no encontró NINGÚN
+        # candidato. `build_health_brain()` (config.py) solo lo pasa
+        # cuando `HEALTH_BRAIN_TYPE=llm` Y `ANTHROPIC_API_KEY` están
+        # configuradas — el mismo gate que ya existe para la redacción
+        # de texto (recado 038), no uno nuevo.
+        self._selection_proposer = selection_proposer
 
     @property
     def _activity(self):
@@ -955,19 +974,72 @@ class HealthBrain:
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
         )
 
+    def _interpretar_seleccion_asistida_por_llm(
+        self,
+        texto: str,
+        opciones_valores: List[str],
+        formatear: Optional[Callable[[str], str]] = None,
+    ) -> Tuple[Optional[str], Optional[VerificacionDeSeleccion]]:
+        """Recado 052 — ÚLTIMO recurso, solo cuando el matching
+        determinista del propio dominio (ordinal + texto libre
+        específico de fecha/hora, recado 051) no encontró NINGÚN
+        candidato — ni siquiera ambiguo (una ambigüedad genuina entre 2+
+        opciones reales ya es, por sí sola, suficientemente informativa;
+        no vale la pena el costo/latencia de una llamada real para
+        resolverla, y el mensaje de aclaración que ya existe muestra
+        las opciones reales en disputa). Nunca se ejecuta si no hay un
+        `SelectionProposer` configurado (`HealthBrain` construido sin
+        uno — default seguro con `HEALTH_BRAIN_TYPE=deterministico`,
+        o si `ANTHROPIC_API_KEY` falta pese a `HEALTH_BRAIN_TYPE=llm`,
+        ver `domains/health/config.py`): en ese caso devuelve
+        `(None, None)` de inmediato, sin ningún intento de red — el
+        llamador sigue con su propio fallback de aclaración de siempre,
+        exactamente como si este mecanismo no existiera.
+
+        `core.selection.interpret_selection` (Core, agnóstico de
+        dominio) es quien VERIFICA que la propuesta del LLM corresponda
+        EXACTAMENTE a una de `opciones_valores` — este método nunca
+        confía en la propuesta por su cuenta. Si se acepta, además arma
+        `VerificacionDeSeleccion` para que
+        `SeleccionAsistidaPorLLMNoVerificadaGuardrail` (Core) pueda
+        volver a verificarlo de forma independiente, como segunda capa."""
+        if self._selection_proposer is None:
+            return None, None
+        opciones = [
+            SelectionOption(id=v, text=formatear(v) if formatear else v) for v in opciones_valores
+        ]
+        resultado = interpret_selection(texto, opciones, self._selection_proposer)
+        if resultado.option is None:
+            return None, None
+        verificacion = VerificacionDeSeleccion(
+            opciones_reales_ids=[o.id for o in opciones],
+            id_seleccionado_via_llm=resultado.option.id,
+        )
+        return resultado.option.id, verificacion
+
     def _interpretar_fecha(self, texto: str, datos: Dict[str, Any]) -> BrainOutput:
         """PASO 2 (respuesta) — el paciente elige una de las fechas ya
         ofrecidas. Primero por ordinal (`_elegir_opcion`, mecanismo de
         siempre, sin cambios); si no matchea, por texto libre (recado
         051: día de semana, día del mes, o la fecha completa tal como
-        se mostró — `_emparejar_fecha_por_texto`). Nunca inventa ni
-        asume la primera si no fue claro, y nunca elige por el paciente
-        si el texto es ambiguo entre dos o más fechas reales ofrecidas."""
+        se mostró — `_emparejar_fecha_por_texto`); si tampoco encuentra
+        NADA (ni ambigüedad), como último recurso se consulta un LLM
+        asistido y VERIFICADO (recado 052,
+        `_interpretar_seleccion_asistida_por_llm`) para lenguaje libre
+        que ninguna regla determinista anticipó (ej. "la del medio",
+        "esa que dijiste primero"). Nunca inventa ni asume la primera si
+        no fue claro, y nunca elige por el paciente si el texto es
+        ambiguo entre dos o más fechas reales ofrecidas."""
         fechas = datos.get("fechas_ofrecidas", [])
         elegida = self._elegir_opcion(texto, fechas)
         candidatos_ambiguos: List[str] = []
         if elegida is None:
             elegida, candidatos_ambiguos = _emparejar_fecha_por_texto(texto, fechas)
+        verificacion_seleccion: Optional[VerificacionDeSeleccion] = None
+        if elegida is None and not candidatos_ambiguos:
+            elegida, verificacion_seleccion = self._interpretar_seleccion_asistida_por_llm(
+                texto, fechas, _formatear_fecha_humana
+            )
         if elegida is None:
             nuevos = datos
             if candidatos_ambiguos:
@@ -987,7 +1059,10 @@ class HealthBrain:
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
             )
         nuevos = {**datos, "fecha_elegida": elegida}
-        return self._ofrecer_horarios(nuevos)
+        salida = self._ofrecer_horarios(nuevos)
+        if verificacion_seleccion is not None:
+            salida = salida.model_copy(update={"verificacion_de_seleccion": verificacion_seleccion})
+        return salida
 
     def _ofrecer_horarios(self, datos: Dict[str, Any]) -> BrainOutput:
         """PASO 3 — horarios reales para el servicio Y la fecha ya
@@ -1036,8 +1111,10 @@ class HealthBrain:
         si no matchea, por texto libre (recado 051: la hora tal como se
         mostró, o solo la hora sin minutos/meridiano —
         `_emparejar_horario_por_texto` sobre `datos["horas_ofrecidas"]`,
-        paralela a `opciones_horario` por índice — nunca se elige por
-        el paciente si el texto es ambiguo entre dos horarios reales)."""
+        paralela a `opciones_horario` por índice); si tampoco encuentra
+        NADA (ni ambigüedad), como último recurso un LLM asistido y
+        VERIFICADO (recado 052) — nunca se elige por el paciente si el
+        texto es ambiguo entre dos horarios reales."""
         opciones = datos.get("opciones_horario", [])
         horas = datos.get("horas_ofrecidas", [])
         elegida = self._elegir_opcion(texto, opciones)
@@ -1046,6 +1123,11 @@ class HealthBrain:
             hora_elegida, candidatos_ambiguos = _emparejar_horario_por_texto(texto, horas)
             if hora_elegida is not None:
                 elegida = opciones[horas.index(hora_elegida)]
+        verificacion_seleccion: Optional[VerificacionDeSeleccion] = None
+        if elegida is None and horas and not candidatos_ambiguos:
+            hora_id, verificacion_seleccion = self._interpretar_seleccion_asistida_por_llm(texto, horas)
+            if hora_id is not None:
+                elegida = opciones[horas.index(hora_id)]
         if elegida is None:
             nuevos = datos
             if candidatos_ambiguos:
@@ -1089,9 +1171,13 @@ class HealthBrain:
             },
             # Recado 037, Parte 3: confirmación determinista ya ocurrió
             # arriba (`_elegir_opcion` matcheó un ordinal real de una
-            # lista real) — nunca la interpretación libre de un LLM.
+            # lista real, o el matching de texto libre del recado 051,
+            # o — recado 052 — un LLM asistido cuya propuesta ya fue
+            # VERIFICADA contra `horas` antes de llegar aquí) — nunca la
+            # interpretación libre de un LLM SIN verificar.
             confirmacion_estructurada_para_write=True,
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+            verificacion_de_seleccion=verificacion_seleccion,
         )
 
     # ------------------------------------------------------------------

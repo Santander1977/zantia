@@ -427,6 +427,49 @@ class OpinionPersonalGuardrail:
         )
 
 
+class SeleccionAsistidaPorLLMNoVerificadaGuardrail:
+    """Recado 052 — mismo patrón que `DatoInventadoGuardrail`:
+    verificación declarativa, agnóstica de dominio (el Core no sabe qué
+    es una "fecha" o un "horario", solo compara identificadores).
+
+    Segunda capa de defensa, INDEPENDIENTE de la verificación que ya
+    hace `core.selection.interpret_selection` internamente antes de
+    devolver cualquier propuesta del LLM al dominio — un dominio bien
+    implementado nunca debería lograr que esta regla bloquee nada (la
+    verificación interna ya lo impide antes). Existe para el mismo
+    motivo que `ConfirmacionEstructuradaRequeridaParaWriteGuardrail`
+    existe pese a que ningún Brain de hoy la viola: convertir una
+    invariante que hoy solo sostiene la disciplina del código en un
+    contrato explícito y auditable por el Core, que un Brain futuro
+    (de cualquier dominio) no puede saltarse por accidente."""
+
+    name = "seleccion_asistida_por_llm_no_verificada"
+
+    def evaluate(self, context: GuardrailContext) -> GuardrailResult:
+        verificacion = context.verificacion_de_seleccion
+        if verificacion is None or verificacion.id_seleccionado_via_llm is None:
+            return GuardrailResult(
+                decision=GuardrailDecision.ALLOW,
+                reason="sin selección asistida por LLM en este turno",
+                guardrail_name=self.name,
+            )
+        if verificacion.id_seleccionado_via_llm not in verificacion.opciones_reales_ids:
+            return GuardrailResult(
+                decision=GuardrailDecision.BLOCK,
+                reason=(
+                    f"La selección asistida por LLM ('{verificacion.id_seleccionado_via_llm}') "
+                    f"no corresponde a ninguna opción real ofrecida este turno "
+                    f"({verificacion.opciones_reales_ids}) — nunca se acepta sin verificación exacta."
+                ),
+                guardrail_name=self.name,
+            )
+        return GuardrailResult(
+            decision=GuardrailDecision.ALLOW,
+            reason="selección asistida por LLM verificada contra las opciones reales de este turno",
+            guardrail_name=self.name,
+        )
+
+
 def reglas_core_por_defecto(tool_categories: Dict[str, object]) -> List[Guardrail]:
     """Lista CANÓNICA de guardrails de Core, en orden de registro —
     fuente de verdad única para evitar que `core/orchestrator.py`
@@ -442,4 +485,5 @@ def reglas_core_por_defecto(tool_categories: Dict[str, object]) -> List[Guardrai
         ConfirmacionEstructuradaRequeridaParaWriteGuardrail(tool_categories),
         FueraDeAlcanceGuardrail(),
         OpinionPersonalGuardrail(),
+        SeleccionAsistidaPorLLMNoVerificadaGuardrail(),
     ]

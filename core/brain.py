@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from state.models import ConversationState
 from memory.conversation_memory import Turn
-from guardrails.base import VerificacionDeDatos
+from guardrails.base import VerificacionDeDatos, VerificacionDeSeleccion
 
 # Lista de palabras clave de riesgo deliberadamente genérica (no médica)
 # para el demo del Core (prompt maestro, sección 27: no convertir el
@@ -66,6 +66,15 @@ class BrainOutput(BaseModel):
     # poblado) en cualquier Brain 100% determinista — el guardrail
     # nunca interfiere en ese caso.
     texto_base_para_comparacion: Optional[str] = None
+    # Recado 052: poblado SOLO cuando el Brain aceptó una selección
+    # (entre varias opciones ya ofrecidas este turno) propuesta por un
+    # `core.selection.SelectionProposer` — para que
+    # `SeleccionAsistidaPorLLMNoVerificadaGuardrail` (guardrails/rules.py)
+    # pueda verificar, de forma independiente, que corresponde a una
+    # opción real. `None` en cualquier turno donde la selección se
+    # resolvió por el matching determinista de siempre (ordinal, texto
+    # exacto) — el guardrail nunca interfiere en ese caso.
+    verificacion_de_seleccion: Optional[VerificacionDeSeleccion] = None
 
 
 class Brain(Protocol):

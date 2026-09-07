@@ -193,6 +193,7 @@ class Orchestrator:
             verificaciones_de_datos=brain_output.verificaciones_de_datos,
             confirmacion_estructurada_para_write=brain_output.confirmacion_estructurada_para_write,
             texto_base_para_comparacion=brain_output.texto_base_para_comparacion,
+            verificacion_de_seleccion=brain_output.verificacion_de_seleccion,
         )
         veredicto = self._guardrails.evaluate(contexto_guardrail)
         self._events.record(

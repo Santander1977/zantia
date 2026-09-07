@@ -151,11 +151,10 @@ def build_health_brain(
     nunca se activa `llm` automáticamente en ningún archivo de
     configuración de este repo (`.env.example` documenta la variable
     con el valor vacío)."""
-    brain_determinista = HealthBrain(activity_provider, appointment_service)
     tipo = os.environ.get(config.env_var, "deterministico").strip().lower()
 
     if tipo in ("", "deterministico", "determinista"):
-        return brain_determinista
+        return HealthBrain(activity_provider, appointment_service)
 
     if tipo == "llm":
         api_key = os.environ.get(config.anthropic_api_key_env_var)
@@ -166,9 +165,27 @@ def build_health_brain(
                 f"{config.anthropic_api_key_env_var} (ver .env.example) para usar el Brain "
                 "basado en LLM real."
             )
-            return brain_determinista
+            return HealthBrain(activity_provider, appointment_service)
+        from core.selection import AnthropicSelectionProposer
+
         from .llm_brain import AnthropicResponseDrafter, HealthAnthropicBrain
 
+        # Recado 052 — MISMO gate que la redacción de texto (recado
+        # 038): `HEALTH_BRAIN_TYPE=llm` + `ANTHROPIC_API_KEY` activa
+        # TAMBIÉN la interpretación de selección asistida por LLM
+        # (fecha/horario en lenguaje libre que el matching determinista
+        # del recado 051 no reconoce) — ningún env var nuevo, ninguna
+        # decisión de activación separada. `HealthBrain` solo la
+        # consulta como ÚLTIMO recurso (ver
+        # `HealthBrain._interpretar_seleccion_asistida_por_llm`),
+        # siempre verificada antes de usarse (`core/selection.py`).
+        brain_determinista = HealthBrain(
+            activity_provider,
+            appointment_service,
+            selection_proposer=AnthropicSelectionProposer(
+                model=config.anthropic_model, api_key_env_var=config.anthropic_api_key_env_var
+            ),
+        )
         drafter = AnthropicResponseDrafter(
             model=config.anthropic_model, api_key_env_var=config.anthropic_api_key_env_var
         )

@@ -1,4 +1,11 @@
-from .base import Guardrail, GuardrailContext, GuardrailDecision, GuardrailResult, VerificacionDeDatos
+from .base import (
+    Guardrail,
+    GuardrailContext,
+    GuardrailDecision,
+    GuardrailResult,
+    VerificacionDeDatos,
+    VerificacionDeSeleccion,
+)
 from .engine import GuardrailEngine
 from .rules import (
     ConfirmacionEstructuradaRequeridaParaWriteGuardrail,
@@ -7,6 +14,7 @@ from .rules import (
     FueraDeAlcanceGuardrail,
     NoPrometerContactoGuardrail,
     OpinionPersonalGuardrail,
+    SeleccionAsistidaPorLLMNoVerificadaGuardrail,
     SenalDeUrgenciaNoSePuedeBajarGuardrail,
     TipoDePreguntaAlteradaGuardrail,
     reglas_core_por_defecto,
@@ -18,6 +26,7 @@ __all__ = [
     "GuardrailDecision",
     "GuardrailResult",
     "VerificacionDeDatos",
+    "VerificacionDeSeleccion",
     "GuardrailEngine",
     "ConfirmacionEstructuradaRequeridaParaWriteGuardrail",
     "ConsentimientoRequeridoParaWriteGuardrail",
@@ -25,6 +34,7 @@ __all__ = [
     "FueraDeAlcanceGuardrail",
     "NoPrometerContactoGuardrail",
     "OpinionPersonalGuardrail",
+    "SeleccionAsistidaPorLLMNoVerificadaGuardrail",
     "SenalDeUrgenciaNoSePuedeBajarGuardrail",
     "TipoDePreguntaAlteradaGuardrail",
     "reglas_core_por_defecto",
