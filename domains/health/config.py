@@ -154,28 +154,8 @@ def build_health_brain(
     brain_determinista = HealthBrain(activity_provider, appointment_service)
     tipo = os.environ.get(config.env_var, "deterministico").strip().lower()
 
-    # --- LOG TEMPORAL DE DIAGNÓSTICO (recado en curso, 2026-09-06) ---
-    # Confirma, para cada Activity/conversación construida, qué tipo de
-    # Brain se pidió (HEALTH_BRAIN_TYPE tal como llegó, ya normalizado)
-    # y qué clase se construyó DE VERDAD — nunca expone ningún valor de
-    # secreto (ANTHROPIC_API_KEY), solo su presencia se reporta en el
-    # warning de fallback que ya existía. Objetivo puntual: confirmar en
-    # los logs de EasyPanel si HEALTH_BRAIN_TYPE nunca llega como "llm"
-    # a este punto, o si llega pero algo más falla en silencio después.
-    # QUITAR una vez resuelto el diagnóstico — no es una verificación de
-    # seguridad real, es un log puntual para esta investigación.
-    def _log_brain_construido(brain: Brain) -> Brain:
-        logger.info(
-            "BRAIN CONSTRUIDO: tipo=%s, clase=%s",
-            tipo,
-            brain.__class__.__name__,
-        )
-        return brain
-    # --- FIN LOG TEMPORAL (la llamada a _log_brain_construido en cada
-    # return de abajo también se quita junto con esto) ---
-
     if tipo in ("", "deterministico", "determinista"):
-        return _log_brain_construido(brain_determinista)
+        return brain_determinista
 
     if tipo == "llm":
         api_key = os.environ.get(config.anthropic_api_key_env_var)
@@ -186,13 +166,13 @@ def build_health_brain(
                 f"{config.anthropic_api_key_env_var} (ver .env.example) para usar el Brain "
                 "basado en LLM real."
             )
-            return _log_brain_construido(brain_determinista)
+            return brain_determinista
         from .llm_brain import AnthropicResponseDrafter, HealthAnthropicBrain
 
         drafter = AnthropicResponseDrafter(
             model=config.anthropic_model, api_key_env_var=config.anthropic_api_key_env_var
         )
-        return _log_brain_construido(HealthAnthropicBrain(brain_determinista, drafter))
+        return HealthAnthropicBrain(brain_determinista, drafter)
 
     raise HealthConfigError(
         f"{config.env_var}={tipo!r} no es un valor reconocido — usar 'deterministico' o 'llm'."
