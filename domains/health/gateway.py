@@ -39,7 +39,7 @@ from .appointment_service import AppointmentService, AppointmentStatus
 from .confirmation import ConfirmationTracker
 from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
 from .intent import _sin_tildes as _sin_tildes_menu
-from .intent import classify_intent
+from .intent import classify_intent_or_none
 from .models import Activity, ActivityStatus, PatientRequest, RequestIntent, RequestStatus
 from .patient_request_source import MockPatientRequestSource, PatientRequestSource
 from .reminder_manager import ReminderManager
@@ -144,6 +144,15 @@ _MENU_NUMERADO = (
     "2. Reprogramar una cita\n"
     "3. Cancelar una cita\n"
     "4. Consultar mis citas"
+)
+
+# Recado 048 — para el turno AMBIGUO que llega DESPUÉS de que ya se le
+# mostró el saludo institucional completo una vez (ver `_saludo_mostrado`
+# en HealthGateway): un recordatorio corto del menú, nunca la
+# presentación completa de nuevo (esa ya se mostró).
+_MENSAJE_INTENCION_NO_RECONOCIDA = (
+    f"No logré identificar qué necesitas — puedes responder con el número o la palabra "
+    f"de una de estas opciones:\n{_MENU_NUMERADO}"
 )
 
 # (ordinal, palabras/frases clave) -> RequestIntent — reutiliza el
@@ -342,6 +351,16 @@ class HealthGateway:
     # identificador de canal nuevo (recado 012, R-15) — se borra en
     # cuanto se resuelve (éxito) o se escala (máximo de intentos).
     _pending_identity: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # patient_reference -> ya se le mostró el saludo institucional
+    # completo (recado 048) MIENTRAS todavía no existe ninguna
+    # conversación abierta para él (`_open_conversations`) — cubre el
+    # tramo entre "hola" (sin intención reconocible, no crea nada
+    # todavía) y el turno en que sí da una intención clara. Se limpia en
+    # `_cerrar_si_definitivo` (mismo momento en que se libera
+    # `_open_conversations`) para que un ciclo de conversación
+    # GENUINAMENTE nuevo, más adelante, sí vuelva a ver el saludo
+    # completo — igual que ya pasa hoy para el camino de intención clara.
+    _saludo_mostrado: set = field(default_factory=set)
 
 
 def build_health_gateway(
@@ -556,7 +575,28 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
             return f"{_saludo_primer_contacto(None)} {respuesta_identificacion}"
         return respuesta_identificacion
 
+    # Recado 048 — hallazgo real de producción: un mensaje SIN ninguna
+    # intención reconocible (ej. "hola") no debe crear ninguna
+    # PatientRequest/Activity ni avanzar ningún flujo — el turno debe
+    # terminar mostrando SOLO el saludo institucional + menú, en espera
+    # de que el paciente responda al menú. `_enrutar_solicitud_nueva`
+    # ahora devuelve `None` en ese caso exacto (ver docstring abajo).
+    saludo_ya_mostrado = patient_reference in gateway._saludo_mostrado
+    gateway._saludo_mostrado.add(patient_reference)
     respuesta = _enrutar_solicitud_nueva(gateway, patient_reference, channel, message_id, text)
+
+    if respuesta is None:
+        # Ninguna intención reconocible en este mensaje — nada se creó.
+        # Recado 046: guion institucional completo SOLO la primera vez;
+        # turnos ambiguos siguientes (`saludo_ya_mostrado`) reciben un
+        # recordatorio corto del menú, nunca la presentación de nuevo.
+        return _MENSAJE_INTENCION_NO_RECONOCIDA if saludo_ya_mostrado else _saludo_primer_contacto(nombre_para_saludo)
+
+    if saludo_ya_mostrado:
+        # Ya se le mostró el saludo en un turno ambiguo anterior de esta
+        # misma "pre-conversación" (sin contexto todavía) — no se repite.
+        return respuesta
+
     # Recado 046: guion institucional completo (saludo + menú numerado)
     # antepuesto al primer turno real — personalizado para un paciente
     # reconocido automáticamente, genérico para uno nuevo en un canal
@@ -568,11 +608,20 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
 
 def _enrutar_solicitud_nueva(
     gateway: "HealthGateway", patient_reference: str, channel: str, message_id: str, text: str
-) -> str:
+) -> Optional[str]:
     """Clasifica y resuelve un mensaje SIN conversación previa abierta —
     extraído de `handle_inbound_message` (recado 034) para poder
     anteponerle un saludo con nombre cuando corresponde, sin repetir
     esta lógica de enrutamiento en cada rama.
+
+    Recado 048: devuelve `None` (en vez de defaultear a PROGRAMAR_CITA)
+    cuando el mensaje no contiene NINGUNA intención reconocible —
+    `classify_intent_or_none` (a diferencia de `classify_intent`, que
+    sigue existiendo tal cual para todo lo demás) permite distinguir
+    ese caso. Antes, un mensaje ambiguo como "hola" caía al fallback de
+    `classify_intent` (PROGRAMAR_CITA) y disparaba de inmediato el
+    flujo completo de reserva (creaba Activity, preguntaba servicio) en
+    el MISMO turno que el saludo — hallazgo real de producción.
 
     Recado 046 (diseño NO bloqueante, ver docstring del módulo/recado):
     `_interpretar_opcion_menu` se prueba PRIMERO — reconoce el ordinal
@@ -584,7 +633,9 @@ def _enrutar_solicitud_nueva(
     MEJORA de precisión, nunca una regresión: solo agrega
     interpretaciones nuevas para mensajes que antes caían al default
     incorrecto, no cambia ninguna clasificación que ya funcionaba."""
-    intent = _interpretar_opcion_menu(text) or classify_intent(text)
+    intent = _interpretar_opcion_menu(text) or classify_intent_or_none(text)
+    if intent is None:
+        return None
     return _resolver_por_intent(gateway, patient_reference, channel, message_id, text, intent)
 
 
@@ -852,6 +903,11 @@ def _cerrar_si_definitivo(gateway: HealthGateway, context: HealthAgentContext) -
     ):
         finalize_and_report(context)
         gateway._open_conversations.pop(context.activity.patient_reference, None)
+        # Recado 048: libera también la marca de "saludo ya mostrado" —
+        # un ciclo de conversación GENUINAMENTE nuevo, más adelante,
+        # debe volver a ver el saludo institucional completo, igual que
+        # ya pasaba para el camino de intención clara (arriba).
+        gateway._saludo_mostrado.discard(context.activity.patient_reference)
         return True
     return False
 

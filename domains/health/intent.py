@@ -7,6 +7,9 @@ mismo estilo determinista por palabras clave que el resto del dominio.
 """
 from __future__ import annotations
 
+import re
+from typing import Optional
+
 from .models import RequestIntent
 
 # Normalización de tildes — ver comentario equivalente y más completo
@@ -52,11 +55,49 @@ _INFORMACION = (
     "que informacion", "como funciona", "mas informacion",
 )
 
+# Recado 048 — hallazgo real de producción: un mensaje que es SOLO un
+# saludo ("hola"), sin ninguna otra palabra de contenido, no debe caer
+# en el mismo default que un mensaje genuinamente ambiguo pero CON
+# intención de fondo (ej. "Sí, claro, ayúdame, puedes orientarme mejor"
+# — recado 030, sigue sin tocarse: no coincide con ningún saludo de
+# `_SALUDOS`, así que jamás pasa por `_es_solo_saludo`, conserva el
+# default de siempre). Mismo vocabulario que `brain.py:_SALUDOS`
+# (deliberadamente duplicado, no importado — ver docstring de
+# `_INFORMACION` arriba) — ordenado de más largo a más corto para que
+# la sustitución de abajo quite la frase completa ("buenas tardes")
+# antes que su prefijo más corto ("buenas").
+_SALUDOS = tuple(sorted(
+    ("hola", "buenas", "buenos dias", "buenas tardes", "buenas noches", "que tal", "hey", "ola"),
+    key=len, reverse=True,
+))
+_RE_SALUDOS = re.compile("|".join(re.escape(s) for s in _SALUDOS))
+_RE_PUNTUACION = re.compile(r"[¡!¿?.,;:]")
 
-def classify_intent(text: str) -> RequestIntent:
-    """Determinista por palabras clave — mismo espíritu que
-    `domains/health/brain.py`, pero para decidir CÓMO enrutar una
-    solicitud nueva, no para conducir la conversación en sí."""
+
+def _es_solo_saludo(texto_sin_tildes: str) -> bool:
+    """True si, tras quitar puntuación y cualquier frase de `_SALUDOS`,
+    no queda ninguna palabra — es decir, el mensaje entero es
+    ÚNICAMENTE un saludo (u una combinación de saludos), sin ningún
+    contenido adicional. Recibe el texto YA en minúsculas y sin
+    tildes."""
+    sin_puntuacion = _RE_PUNTUACION.sub(" ", texto_sin_tildes)
+    sin_saludos = _RE_SALUDOS.sub(" ", sin_puntuacion)
+    return sin_saludos.strip() == ""
+
+
+def classify_intent_or_none(text: str) -> Optional[RequestIntent]:
+    """Recado 048 — misma clasificación determinista por palabras clave
+    que `classify_intent`, pero distingue un caso adicional: un mensaje
+    que es ÚNICAMENTE un saludo ("hola"), sin ninguna otra palabra de
+    contenido, devuelve `None` en vez de caer en el default de
+    `PROGRAMAR_CITA`. Existe para que `gateway.py` pueda mostrar SOLO el
+    saludo institucional + menú en ese caso — antes, "hola" disparaba de
+    inmediato el flujo completo de reserva (creaba Activity, preguntaba
+    servicio) en el MISMO turno que el saludo, un hallazgo real de
+    producción. Cualquier otro mensaje ambiguo pero CON contenido (ej.
+    "Sí, claro, ayúdame" — recado 030) conserva el comportamiento de
+    siempre sin cambios: `classify_intent` sigue existiendo tal cual
+    para todo lo demás, ahora delega aquí."""
     texto = text.lower().strip()
 
     if any(k in texto for k in _REPROGRAMAR):
@@ -73,8 +114,23 @@ def classify_intent(text: str) -> RequestIntent:
         return RequestIntent.INFORMACION_SERVICIO
     if any(k in texto for k in _PROGRAMAR):
         return RequestIntent.PROGRAMAR_CITA
-
-    # Sin coincidencia clara: se trata como intención de programar,
-    # dado que es el punto de entrada más seguro (ofrece ayuda en vez
-    # de asumir que el paciente ya tiene una cita que gestionar).
+    if _es_solo_saludo(_sin_tildes(texto)):
+        return None
+    # Sin coincidencia clara, y con ALGÚN contenido más allá de un
+    # saludo: se trata como intención de programar (recado 030), dado
+    # que es el punto de entrada más seguro (ofrece ayuda en vez de
+    # asumir que el paciente ya tiene una cita que gestionar).
     return RequestIntent.PROGRAMAR_CITA
+
+
+def classify_intent(text: str) -> RequestIntent:
+    """Determinista por palabras clave — mismo espíritu que
+    `domains/health/brain.py`, pero para decidir CÓMO enrutar una
+    solicitud nueva, no para conducir la conversación en sí.
+
+    A diferencia de `classify_intent_or_none` (arriba, usada por
+    `gateway.py` desde el recado 048), esta función SIEMPRE devuelve
+    algo útil — un saludo puro ("hola") también cae en `PROGRAMAR_CITA`
+    aquí, para no cambiar el comportamiento de ningún llamador existente
+    que dependa de ese contrato."""
+    return classify_intent_or_none(text) or RequestIntent.PROGRAMAR_CITA
