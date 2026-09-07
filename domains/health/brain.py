@@ -262,8 +262,8 @@ _VARIANTES_ACLARACION_SI_NO = (
     "Perdona, no logré identificar si tu respuesta es un sí o un no — ¿me lo confirmas así puedo seguir ayudándote a agendar?",
 )
 _VARIANTES_SERVICIO_NO_IDENTIFICADO = (
-    "No logré identificar cuál de estos prefieres: {opciones}. ¿Me confirmas el nombre tal como aparece en la lista?",
-    "Perdona, no reconocí cuál de estos servicios quieres: {opciones}. ¿Me lo repites tal cual aparece ahí?",
+    "No logré identificar cuál de estos prefieres:\n{opciones}\n¿Me confirmas el nombre tal como aparece en la lista?",
+    "Perdona, no reconocí cuál de estos servicios quieres:\n{opciones}\n¿Me lo repites tal cual aparece ahí?",
 )
 _VARIANTES_SELECCION_NO_IDENTIFICADA = (
     "No logré identificar cuál prefieres — ¿me confirmas si es la 1, la 2 o la 3?",
@@ -280,8 +280,8 @@ _VARIANTES_FECHA_NO_IDENTIFICADA = (
 # (no el catálogo completo de nuevo, para reconocer que sí escribió
 # algo reconocible).
 _VARIANTES_SERVICIO_AMBIGUO = (
-    "Creo que podrías referirte a más de uno de estos: {opciones}. ¿Cuál de los dos es el que necesitas?",
-    "No quiero adivinar entre estos: {opciones}. ¿Me confirmas cuál de los dos prefieres?",
+    "Creo que podrías referirte a más de uno de estos:\n{opciones}\n¿Cuál de los dos es el que necesitas?",
+    "No quiero adivinar entre estos:\n{opciones}\n¿Me confirmas cuál de los dos prefieres?",
 )
 # Ambigüedad genuina de fecha/horario (recado 051, mismo criterio que
 # `_VARIANTES_SERVICIO_AMBIGUO` arriba) — el paciente escribió un día de
@@ -289,12 +289,12 @@ _VARIANTES_SERVICIO_AMBIGUO = (
 # opciones ofrecidas (ej. dos fechas ofrecidas caen el mismo día de la
 # semana en semanas distintas). Nunca se elige por el paciente.
 _VARIANTES_FECHA_AMBIGUA = (
-    "Creo que podrías referirte a más de una de estas fechas: {opciones}. ¿Cuál de las dos prefieres?",
-    "No quiero adivinar entre estas fechas: {opciones}. ¿Me confirmas cuál de las dos es?",
+    "Creo que podrías referirte a más de una de estas fechas:\n{opciones}\n¿Cuál de las dos prefieres?",
+    "No quiero adivinar entre estas fechas:\n{opciones}\n¿Me confirmas cuál de las dos es?",
 )
 _VARIANTES_HORARIO_AMBIGUO = (
-    "Creo que podrías referirte a más de uno de estos horarios: {opciones}. ¿Cuál de los dos prefieres?",
-    "No quiero adivinar entre estos horarios: {opciones}. ¿Me confirmas cuál de los dos es?",
+    "Creo que podrías referirte a más de uno de estos horarios:\n{opciones}\n¿Cuál de los dos prefieres?",
+    "No quiero adivinar entre estos horarios:\n{opciones}\n¿Me confirmas cuál de los dos es?",
 )
 
 # Nombres en español para formatear una fecha real ("2026-09-07") de
@@ -1044,13 +1044,13 @@ class HealthBrain:
         if elegido is None:
             nuevos = datos
             if candidatos_ambiguos:
-                texto_candidatos = ", ".join(candidatos_ambiguos)
+                texto_candidatos = _lista_numerada(candidatos_ambiguos)
                 variante, nuevos = _elegir_variante(
                     _VARIANTES_SERVICIO_AMBIGUO, datos, "intentos_aclaracion_servicio_ambiguo"
                 )
                 respuesta = variante.format(opciones=texto_candidatos)
             elif servicios:
-                texto_servicios = ", ".join(servicios)
+                texto_servicios = _lista_numerada(servicios)
                 variante, nuevos = _elegir_variante(
                     _VARIANTES_SERVICIO_NO_IDENTIFICADO, datos, "intentos_aclaracion_servicio"
                 )
@@ -1194,7 +1194,7 @@ class HealthBrain:
         if elegida is None:
             nuevos = datos
             if candidatos_ambiguos:
-                texto_candidatos = "; ".join(_formatear_fecha_humana(f) for f in candidatos_ambiguos)
+                texto_candidatos = _lista_numerada([_formatear_fecha_humana(f) for f in candidatos_ambiguos])
                 variante, nuevos = _elegir_variante(
                     _VARIANTES_FECHA_AMBIGUA, datos, "intentos_aclaracion_fecha_ambigua"
                 )
@@ -1314,7 +1314,7 @@ class HealthBrain:
         if elegida is None:
             nuevos = datos
             if candidatos_ambiguos:
-                texto_candidatos = "; ".join(candidatos_ambiguos)
+                texto_candidatos = _lista_numerada(candidatos_ambiguos)
                 variante, nuevos = _elegir_variante(
                     _VARIANTES_HORARIO_AMBIGUO, datos, "intentos_aclaracion_horario_ambiguo"
                 )
@@ -1466,7 +1466,11 @@ class HealthBrain:
     # ------------------------------------------------------------------
     def _iniciar_reprogramacion(self, datos: Dict[str, Any]) -> BrainOutput:
         servicio = self._activity.service or "medicina general"
-        opciones = self._appointment_service.get_availability(servicio)[:3]
+        # Recado 056 — mismo fix de `_ofrecer_horarios`: ordena antes de
+        # recortar a 3, nunca depende del orden de `get_availability`.
+        opciones = sorted(
+            self._appointment_service.get_availability(servicio), key=lambda o: (o.date, o.time)
+        )[:3]
         nuevos = {
             **datos,
             "etapa": "esperando_seleccion_reprogramacion",
@@ -1483,12 +1487,19 @@ class HealthBrain:
                 ),
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": {**datos, "etapa": "finalizada"}},
             )
-        texto_opciones = "; ".join(
-            f"{i+1}) {o.date} {o.time} en {o.location}" for i, o in enumerate(opciones)
+        # Recado 056 — mismo formato de lista numerada del recado 055,
+        # fecha en el mismo formato humano ya establecido en el resto
+        # del archivo (nunca ISO cruda). Deliberadamente fuera del
+        # alcance original del recado 055 (no era uno de los 4 lugares
+        # pedidos) — corregido ahora para consistencia total, mismo
+        # patrón de "encontrado al investigar, corregido en el mismo
+        # trabajo" del resto de esta sesión.
+        lista_opciones = _lista_numerada(
+            [f"{_formatear_fecha_humana(o.date)}, {o.time}, {o.location}" for o in opciones]
         )
         return BrainOutput(
             senales_detectadas=["reprogramacion_solicitada"],
-            respuesta_propuesta=f"Claro que sí, aquí tienes otras opciones: {texto_opciones}. ¿Cuál te queda mejor?",
+            respuesta_propuesta=f"Claro que sí, aquí tienes otras opciones:\n{lista_opciones}\n¿Cuál te queda mejor?",
             proxima_accion_propuesta="preguntar_dato_faltante",  # ver comentario equivalente arriba
             tool_requerida={"name": "get_availability", "params": {"service": servicio}},
             propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},

@@ -140,10 +140,61 @@ def test_webhook_telegram_flujo_completo_con_mock(app_module, monkeypatch):
 
     assert r.status_code == 200
     assert r.json() == {"procesado": True, "respondido": True}
-    assert len(llamadas) == 1
-    assert llamadas[0]["url"] == "https://api.telegram.org/bottoken-prueba-no-real/sendMessage"
-    assert llamadas[0]["body"]["chat_id"] == 555111222
-    assert len(llamadas[0]["body"]["text"]) > 0
+    # Recado 056, Punto 4: al menos 1 `sendChatAction` (typing) ANTES del
+    # `sendMessage` real — el procesamiento de este test es rápido
+    # (Mock, sin red real), así que normalmente es exactamente 1, pero
+    # no se asume un conteo exacto (la tarea de fondo podría alcanzar a
+    # repetirlo si la máquina de CI va lenta).
+    llamadas_typing = [l for l in llamadas if l["url"].endswith("/sendChatAction")]
+    llamadas_mensaje = [l for l in llamadas if l["url"].endswith("/sendMessage")]
+    assert len(llamadas_typing) >= 1
+    assert llamadas_typing[0]["body"] == {"chat_id": 555111222, "action": "typing"}
+    assert len(llamadas_mensaje) == 1
+    assert llamadas_mensaje[0]["body"]["chat_id"] == 555111222
+    assert len(llamadas_mensaje[0]["body"]["text"]) > 0
+    # El indicador de escritura siempre llega ANTES que el mensaje real.
+    assert llamadas.index(llamadas_typing[0]) < llamadas.index(llamadas_mensaje[0])
+
+
+def test_webhook_telegram_repite_indicador_de_escritura_si_el_procesamiento_tarda(app_module, monkeypatch):
+    """Recado 056, Punto 4 — si el procesamiento real (ej. latencia de un
+    LLM) tarda más que un solo intervalo, el indicador de escritura debe
+    repetirse — nunca desaparecer a mitad de una respuesta lenta.
+    Intervalo acelerado a 0.05s (en vez de 4s reales) para no volver la
+    prueba lenta; el procesamiento simulado tarda 0.17s (> 3 intervalos)."""
+    import time
+
+    monkeypatch.setattr(app_module, "_INTERVALO_INDICADOR_ESCRITURA_SEGUNDOS", 0.05)
+
+    def _procesamiento_lento(*args, **kwargs):
+        time.sleep(0.17)
+        return "listo"
+
+    monkeypatch.setattr(app_module, "handle_inbound_message", _procesamiento_lento)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token-prueba-no-real")
+
+    llamadas = []
+
+    def _http_post_fake(url, body):
+        llamadas.append(body)
+        return {"ok": True, "result": {"message_id": 1}}
+
+    with patch.object(app_module._canal_telegram, "http_post", _http_post_fake):
+        client = TestClient(app_module.app)
+        r = client.post(
+            "/webhook/telegram",
+            json={
+                "update_id": 1,
+                "message": {"message_id": 1, "chat": {"id": 555333111}, "text": "cualquier cosa"},
+            },
+            headers={"X-Telegram-Bot-Api-Secret-Token": _TELEGRAM_SECRETO_PRUEBA},
+        )
+
+    assert r.status_code == 200
+    llamadas_typing = [b for b in llamadas if b.get("action") == "typing"]
+    assert len(llamadas_typing) >= 2, (
+        f"debía repetir el indicador de escritura durante un procesamiento lento: {llamadas!r}"
+    )
 
 
 def test_webhook_telegram_ignora_update_sin_mensaje_de_texto(app_module):
@@ -286,7 +337,11 @@ def test_arranque_funciona_sin_chatwoot_si_telegram_si_esta_configurado(monkeypa
 
     assert r.status_code == 200
     assert r.json() == {"procesado": True, "respondido": True}
-    assert len(llamadas) == 1
+    # Recado 056, Punto 4: al menos 1 llamada de `sendChatAction` (typing)
+    # + 1 de `sendMessage` real — ya no exactamente 1 en total.
+    assert len(llamadas) >= 2
+    assert any(b.get("action") == "typing" for b in llamadas)
+    assert any("text" in b for b in llamadas)
 
 
 def test_webhook_chatwoot_sin_configurar_responde_503_explicito(monkeypatch):

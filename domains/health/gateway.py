@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -243,6 +243,32 @@ def _saludo_primer_contacto(nombre_conocido: Optional[str]) -> str:
     return f"{saludo_hora}. {_PRESENTACION_ANDRES} ¿Qué deseas hacer?\n{_MENU_NUMERADO}"
 
 
+# Recado 056, Punto 3 — pedido explícito del usuario: si el paciente
+# escribe de nuevo poco tiempo después de que su interacción anterior
+# cerró efectivamente (reserva confirmada/reprogramada/declinada), no
+# tiene sentido repetirle la presentación institucional completa ni el
+# menú extenso — ya la vio hace un momento. Umbral decidido de forma
+# autónoma (pedido explícito del usuario, "decide tú"): 30 minutos —
+# suficientemente corto para significar "la misma sesión de uso", lo
+# bastante largo para cubrir que el paciente se distraiga un momento
+# antes de escribir de nuevo. Pasado ese umbral, se trata como un
+# regreso genuinamente nuevo (saludo completo de siempre).
+_VENTANA_SALUDO_CORTO = timedelta(minutes=30)
+
+
+def _saludo_corto_de_regreso(nombre_conocido: Optional[str]) -> str:
+    """SIN presentación institucional ("Soy Andrés...") ni menú
+    numerado — solo el saludo corto + una pregunta abierta. Si no se
+    conoce el nombre (caso raro: se cerró una Activity sin
+    `patient_contact.nombre`), usa una forma neutra sin tratamiento
+    formal en vez de inventar un nombre."""
+    saludo_hora = _saludo_segun_hora_bogota()
+    if nombre_conocido:
+        tratamiento = _tratamiento_formal(nombre_conocido)
+        return f"¡{saludo_hora}, {tratamiento} {nombre_conocido}! ¿Puedo ayudarlo en algo más?"
+    return f"¡{saludo_hora}! ¿Puedo ayudarte en algo más?"
+
+
 def _resolver_consulta_catalogo(gateway: "HealthGateway", request: PatientRequest, channel: str) -> str:
     """RequestIntent.INFORMACION_SERVICIO — responde "qué servicios
     tienen" con el catálogo REAL ya sincronizado (recado 027), nunca
@@ -291,11 +317,8 @@ def _resolver_consulta_catalogo(gateway: "HealthGateway", request: PatientReques
         estado.model_copy(update={"datos_recopilados": nuevos_datos}), expected_version=estado.version
     )
 
-    texto_servicios = ", ".join(servicios)
-    return (
-        f"Estos son los servicios que tenemos disponibles: {texto_servicios}. "
-        "¿Para cuál te gustaría agendar?"
-    )
+    lista_servicios = _lista_numerada(servicios)
+    return f"Estos son los servicios que tenemos disponibles:\n{lista_servicios}\n¿Para cuál te gustaría agendar?"
 
 # Canales cuyo identificador (`patient_reference`) NO es un documento de
 # identidad (recado 012, R-15) — ChatwootChannel (número de WhatsApp) y,
@@ -376,6 +399,16 @@ class HealthGateway:
     # criterio "más simple posible" que el resto de los flags de este
     # dataclass, ej. `_saludo_mostrado`).
     _recien_cerrada: Dict[str, str] = field(default_factory=dict)
+    # Recado 056, Punto 3 — patient_reference -> (momento real del
+    # cierre, nombre conocido del paciente o None). A diferencia de
+    # `_recien_cerrada` (arriba, ventana de UN turno, siempre se
+    # consume), esta SÍ necesita tiempo real (`_VENTANA_SALUDO_CORTO`)
+    # porque cubre un caso distinto: no "¿este mensaje es sobre lo que
+    # se acaba de cerrar?" (ya resuelto por la ventana de gracia), sino
+    # "¿ya lo saludé hace un momento?" — se consulta (nunca se hace
+    # `pop`) cada vez que se necesita decidir el saludo; expira sola por
+    # tiempo, no por uso.
+    _cierre_reciente: Dict[str, "tuple[datetime, Optional[str]]"] = field(default_factory=dict)
 
 
 def build_health_gateway(
@@ -614,25 +647,43 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
     gateway._saludo_mostrado.add(patient_reference)
     respuesta = _enrutar_solicitud_nueva(gateway, patient_reference, channel, message_id, text)
 
+    # Recado 056, Punto 3 — si este paciente cerró una interacción hace
+    # POCO tiempo (`_VENTANA_SALUDO_CORTO`), el saludo de apertura de
+    # este ciclo nuevo es CORTO (sin presentación institucional ni menú
+    # extenso) en vez del guion completo de siempre — ya lo vio hace un
+    # momento. Nombre: preferir el ya resuelto por identidad real
+    # (`nombre_para_saludo`); si no hay (canal sin gate de identidad,
+    # ej. "demo"), usar el que quedó guardado al cerrar la Activity
+    # anterior.
+    cierre = gateway._cierre_reciente.get(patient_reference)
+    saludo_corto_aplica = cierre is not None and (datetime.now(timezone.utc) - cierre[0]) < _VENTANA_SALUDO_CORTO
+    if saludo_corto_aplica:
+        nombre_efectivo = nombre_para_saludo or cierre[1]
+        saludo_apertura = _saludo_corto_de_regreso(nombre_efectivo)
+    else:
+        saludo_apertura = _saludo_primer_contacto(nombre_para_saludo)
+
     if respuesta is None:
         # Ninguna intención reconocible en este mensaje — nada se creó.
-        # Recado 046: guion institucional completo SOLO la primera vez;
-        # turnos ambiguos siguientes (`saludo_ya_mostrado`) reciben un
-        # recordatorio corto del menú, nunca la presentación de nuevo.
-        return _MENSAJE_INTENCION_NO_RECONOCIDA if saludo_ya_mostrado else _saludo_primer_contacto(nombre_para_saludo)
+        # Recado 046: guion completo (o corto, ver arriba) SOLO la
+        # primera vez; turnos ambiguos siguientes (`saludo_ya_mostrado`)
+        # reciben un recordatorio corto del menú, nunca la presentación
+        # de nuevo.
+        return _MENSAJE_INTENCION_NO_RECONOCIDA if saludo_ya_mostrado else saludo_apertura
 
     if saludo_ya_mostrado:
         # Ya se le mostró el saludo en un turno ambiguo anterior de esta
         # misma "pre-conversación" (sin contexto todavía) — no se repite.
         return respuesta
 
-    # Recado 046: guion institucional completo (saludo + menú numerado)
-    # antepuesto al primer turno real — personalizado para un paciente
-    # reconocido automáticamente, genérico para uno nuevo en un canal
-    # sin gate de identidad. Mismo criterio de "solo en el primer turno"
-    # que ya tenía el saludo anterior — este punto solo se alcanza
-    # cuando no hay conversación abierta todavía.
-    return f"{_saludo_primer_contacto(nombre_para_saludo)} {respuesta}"
+    # Recado 046: guion de apertura (completo, o corto tras un cierre
+    # reciente — recado 056) antepuesto al primer turno real —
+    # personalizado para un paciente reconocido automáticamente,
+    # genérico para uno nuevo en un canal sin gate de identidad. Mismo
+    # criterio de "solo en el primer turno" que ya tenía el saludo
+    # anterior — este punto solo se alcanza cuando no hay conversación
+    # abierta todavía.
+    return f"{saludo_apertura} {respuesta}"
 
 
 def _enrutar_solicitud_nueva(
@@ -731,11 +782,8 @@ def _determinar_servicio_inicial(gateway: "HealthGateway"):
         return servicios[0], None
     if not servicios:
         return "medicina general", None
-    texto_servicios = ", ".join(servicios)
-    mensaje = (
-        f"Antes de seguir, ¿para cuál servicio te gustaría agendar? "
-        f"Estas son las opciones: {texto_servicios}."
-    )
+    lista_servicios = _lista_numerada(servicios)
+    mensaje = f"Antes de seguir, ¿para cuál servicio te gustaría agendar?\n{lista_servicios}"
     return None, mensaje
 
 
@@ -962,6 +1010,12 @@ def _cerrar_si_definitivo(gateway: HealthGateway, patient_reference: str, contex
         # (ya lo estaba antes de este recado, sin cambios) precisamente
         # para que la ventana de gracia pueda recuperarlo.
         gateway._recien_cerrada[patient_reference] = context.activity.activity_id
+        # Recado 056, Punto 3 — registra el momento real del cierre (hora
+        # real, no simulada) + el nombre conocido de la Activity que se
+        # acaba de cerrar, para que un regreso poco después reciba un
+        # saludo corto en vez de la presentación institucional completa.
+        nombre_conocido = (context.activity.patient_contact or {}).get("nombre")
+        gateway._cierre_reciente[patient_reference] = (datetime.now(timezone.utc), nombre_conocido)
         return True
     return False
 
@@ -1221,11 +1275,19 @@ def _elegir_opcion_ordinal(texto: str, opciones: list) -> Optional[str]:
     """Utilidad mínima y genérica ('1'/'primera' -> índice 0) — no es
     una copia de `HealthBrain._elegir_opcion` (privado, ligado a su
     propia máquina de etapas); aquí no hay ninguna lógica de dominio,
-    solo interpretar un ordinal de una lista ya ofrecida."""
+    solo interpretar un ordinal de una lista ya ofrecida.
+
+    Recado 056 — mismo bug real de `HealthBrain._elegir_opcion` (recado
+    053, caso Giselle Tornay): un `in` simple sobre "1"/"2"/"3" hacía que
+    CUALQUIER texto que contuviera esos dígitos en cualquier posición
+    (una hora tipo "7:30", por ejemplo) se malinterpretara como ordinal.
+    Encontrado al revisar este archivo buscando el mismo patrón de bug
+    en otros lugares — esta copia local nunca se había corregido.
+    `\\b...\\b` exige que el dígito sea un token propio."""
     texto = texto.lower()
     mapa = {"1": 0, "primera": 0, "2": 1, "segunda": 1, "3": 2, "tercera": 2}
     for clave, indice in mapa.items():
-        if clave in texto and indice < len(opciones):
+        if re.search(rf"\b{re.escape(clave)}\b", texto) and indice < len(opciones):
             return opciones[indice]
     return None
 
@@ -1240,7 +1302,12 @@ def _iniciar_verificacion_para_gestion(gateway: HealthGateway, request: PatientR
     accion = "cancelar" if request.intent == RequestIntent.CANCELAR_CITA else "reprogramar"
 
     if accion == "reprogramar":
-        opciones = gateway.appointment_service.get_availability(cita.service)[:3]
+        # Recado 056 — mismo fix de `HealthBrain._ofrecer_horarios`:
+        # ordena antes de recortar a 3, nunca depende del orden de
+        # `get_availability`.
+        opciones = sorted(
+            gateway.appointment_service.get_availability(cita.service), key=lambda o: (o.date, o.time)
+        )[:3]
         if not opciones:
             # NUNCA "te contactamos" (recado 027, hallazgo real — mismo
             # patrón que recado 026, pero esta rama es TODAVÍA más
@@ -1263,10 +1330,10 @@ def _iniciar_verificacion_para_gestion(gateway: HealthGateway, request: PatientR
             "request_id": request.request_id,
             "service": cita.service,
         }
-        texto_opciones = "; ".join(
-            f"{i+1}) {o.date} {o.time} en {o.location}" for i, o in enumerate(opciones)
+        lista_opciones = _lista_numerada(
+            [f"{_formatear_fecha_humana(o.date)}, {o.time}, {o.location}" for o in opciones]
         )
-        return f"Aquí tienes otras opciones: {texto_opciones}. ¿Cuál prefieres?"
+        return f"Aquí tienes otras opciones:\n{lista_opciones}\n¿Cuál prefieres?"
 
     # Cancelar no necesita elegir nada — directo a enviar el código.
     return _enviar_codigo_y_pausar(gateway, request.patient_reference, accion, cita.appointment_id, documento, request.request_id)

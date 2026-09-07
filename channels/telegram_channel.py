@@ -177,3 +177,29 @@ class TelegramChannel:
         if not respuesta.get("ok", False):
             raise TelegramChannelError(f"Telegram respondió sin éxito al enviar el mensaje: {respuesta!r}")
         self.sent.append(message)
+
+    def send_typing_action(self, conversation_id: str) -> None:
+        """Recado 056, Punto 4 — `sendChatAction` (acción "typing") de la
+        Bot API pública de Telegram: le muestra al paciente el indicador
+        nativo "escribiendo..." mientras el sistema procesa su mensaje
+        (incluida la latencia real de una llamada a un LLM, con
+        `HEALTH_BRAIN_TYPE=llm` activo). Telegram apaga este indicador
+        solo (~5 segundos) o en cuanto llega el siguiente `sendMessage`
+        real — quien llame a este método y necesite mantenerlo visible
+        durante un procesamiento más largo debe volver a llamarlo
+        periódicamente (ver `service/app.py`, que lo repite cada 4
+        segundos en una tarea de fondo mientras dura el procesamiento
+        real). Mismo criterio de error que `send()` — lanza
+        `TelegramChannelError` explícito, nunca falla en silencio; es
+        responsabilidad de quien llama decidir si un fallo aquí (best
+        effort, cosmético) debe o no interrumpir el procesamiento real
+        del mensaje (nunca debería)."""
+        token = os.environ.get(self.bot_token_env_var)
+        if not token:
+            raise TelegramChannelError(
+                f"Variable de entorno {self.bot_token_env_var} no configurada (ver .env.example)."
+            )
+        url = f"{self.base_url.rstrip('/')}/bot{token}/sendChatAction"
+        respuesta = self.http_post(url, {"chat_id": int(conversation_id), "action": "typing"})
+        if not respuesta.get("ok", False):
+            raise TelegramChannelError(f"Telegram respondió sin éxito al enviar sendChatAction: {respuesta!r}")

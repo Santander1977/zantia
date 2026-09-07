@@ -85,6 +85,46 @@ def _es_solo_saludo(texto_sin_tildes: str) -> bool:
     return sin_saludos.strip() == ""
 
 
+# Recado 056, hallazgo real de producción ("hola" -> "consultar" ->
+# "listamelas", esta última sin ninguna intención reconocible): el
+# fallback histórico a PROGRAMAR_CITA (recado 030) también disparaba
+# para CUALQUIER texto sin match, no solo mensajes con intención real de
+# fondo — "listamelas" (o cualquier palabra sin sentido/typo grave)
+# hacía que el sistema arrancara el flujo de reserva completo en
+# silencio (creaba Activity, ofrecía fechas) sin que el paciente hubiera
+# expresado ninguna voluntad de agendar. El recado 048 ya había resuelto
+# esto para un saludo PURO — este es el mismo problema, más amplio: el
+# fallback a PROGRAMAR_CITA ahora exige, además de "no matchear ninguna
+# categoría específica", que el texto SÍ contenga una señal mínima de
+# intención/voluntad de proceder — afirmación (mismo vocabulario que
+# `brain.py:_es_afirmativo`, deliberadamente duplicado — ver docstring
+# de `_INFORMACION` arriba) O un verbo/fórmula típica de PEDIR algo
+# ("necesito", "quiero", "ayuda", "por favor", etc.). Primer intento
+# (solo afirmación) rompió un caso real existente: "necesito otra cita
+# de urgencias" (recado 049/050, solicitud nueva legítima tras un
+# cierre) no contiene "sí" ni ninguna frase de aceptación — se agregaron
+# los verbos de pedido para cubrir ese caso sin reintroducir el bug
+# original. Preserva intacto el caso que motivó el recado 030 ("Sí,
+# claro, ayúdame..." contiene "sí") Y cualquier solicitud fraseada
+# naturalmente ("necesito...", "quiero...", "ayúdame..."); un texto sin
+# NINGUNA de estas señales ("listamelas") se trata como "sin intención"
+# (`None`), igual que un saludo puro.
+_RE_PALABRA_SI = re.compile(r"\bsi\b")
+_ACEPTA_FRASES = ("acepto", "me interesa", "claro que", "dale", "vale", "de acuerdo", "esta bien")
+_VERBOS_DE_PEDIDO = (
+    "necesito", "necesitamos", "quiero", "quisiera", "quisieramos", "podria", "podrias", "puedes", "puedo",
+    "ayuda", "ayudame", "porfa", "por favor", "dame", "hazme", "me gustaria", "deseo",
+)
+
+
+def _tiene_senal_de_intencion(texto_sin_tildes: str) -> bool:
+    return (
+        bool(_RE_PALABRA_SI.search(texto_sin_tildes))
+        or any(frase in texto_sin_tildes for frase in _ACEPTA_FRASES)
+        or any(verbo in texto_sin_tildes for verbo in _VERBOS_DE_PEDIDO)
+    )
+
+
 def classify_intent_or_none(text: str) -> Optional[RequestIntent]:
     """Recado 048 — misma clasificación determinista por palabras clave
     que `classify_intent`, pero distingue un caso adicional: un mensaje
@@ -114,13 +154,18 @@ def classify_intent_or_none(text: str) -> Optional[RequestIntent]:
         return RequestIntent.INFORMACION_SERVICIO
     if any(k in texto for k in _PROGRAMAR):
         return RequestIntent.PROGRAMAR_CITA
-    if _es_solo_saludo(_sin_tildes(texto)):
+    sin_tildes = _sin_tildes(texto)
+    if _es_solo_saludo(sin_tildes):
         return None
-    # Sin coincidencia clara, y con ALGÚN contenido más allá de un
-    # saludo: se trata como intención de programar (recado 030), dado
-    # que es el punto de entrada más seguro (ofrece ayuda en vez de
-    # asumir que el paciente ya tiene una cita que gestionar).
-    return RequestIntent.PROGRAMAR_CITA
+    # Recado 056 — sin coincidencia clara: solo se trata como intención
+    # de programar (recado 030, "el punto de entrada más seguro") si el
+    # texto SÍ trae una señal mínima de afirmación/voluntad de proceder
+    # — nunca para un texto genuinamente sin sentido ("listamelas", un
+    # typo grave, ruido). Sin esa señal, se trata igual que un saludo
+    # puro: "sin intención" (`None`).
+    if _tiene_senal_de_intencion(sin_tildes):
+        return RequestIntent.PROGRAMAR_CITA
+    return None
 
 
 def classify_intent(text: str) -> RequestIntent:

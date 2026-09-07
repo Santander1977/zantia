@@ -45,6 +45,7 @@ evidencia real.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -176,6 +177,54 @@ async def webhook_chatwoot(request: Request):
     return {"procesado": True, "respondido": True}
 
 
+_INTERVALO_INDICADOR_ESCRITURA_SEGUNDOS = 4.0
+
+
+async def _mantener_indicador_de_escritura(conversation_id: str) -> None:
+    """Recado 056, Punto 4 — repite `sendChatAction` cada
+    `_INTERVALO_INDICADOR_ESCRITURA_SEGUNDOS` (menor a los ~5 segundos
+    que Telegram mantiene el indicador nativo visible por sí solo) hasta
+    que la tarea se cancele — decisión explícita para el caso "la
+    respuesta tarda más de lo que dura la señal" (ej. una llamada real a
+    Anthropic con latencia variable): sin este refresco periódico, el
+    indicador desaparecería a mitad de un procesamiento largo, dando la
+    falsa impresión de que el bot dejó de responder. Best-effort: un
+    fallo puntual de red aquí (cosmético, nunca crítico) se registra y
+    se sigue intentando en el siguiente ciclo, nunca interrumpe el
+    procesamiento real del mensaje (que corre en paralelo, ver
+    `_procesar_con_indicador_de_escritura`)."""
+    while True:
+        try:
+            _canal_telegram.send_typing_action(conversation_id)
+        except TelegramChannelError as exc:
+            logger.warning("No se pudo enviar el indicador de escritura a Telegram: %s", exc)
+        await asyncio.sleep(_INTERVALO_INDICADOR_ESCRITURA_SEGUNDOS)
+
+
+async def _procesar_con_indicador_de_escritura(mensaje) -> str:
+    """Muestra el indicador nativo "escribiendo..." de Telegram mientras
+    se procesa el mensaje real — `handle_inbound_message` corre en un
+    hilo aparte (`asyncio.to_thread`, nunca bloquea el event loop) para
+    que la tarea de fondo que refresca el indicador (arriba) sí tenga
+    oportunidad real de ejecutarse durante esa espera (incluida la
+    latencia real de una llamada a un LLM, con `HEALTH_BRAIN_TYPE=llm`
+    activo) — antes de este cambio, `handle_inbound_message` corría
+    síncrono en el mismo hilo del event loop, así que cualquier tarea
+    de fondo programada durante esa llamada nunca llegaba a correr."""
+    tarea_indicador = asyncio.create_task(_mantener_indicador_de_escritura(mensaje.conversation_id))
+    try:
+        return await asyncio.to_thread(
+            handle_inbound_message,
+            _gateway,
+            patient_reference=mensaje.conversation_id,
+            channel=_canal_telegram.canal,
+            message_id=mensaje.message_id,
+            text=mensaje.text,
+        )
+    finally:
+        tarea_indicador.cancel()
+
+
 @app.post("/webhook/telegram")
 async def webhook_telegram(request: Request):
     """Registrar esta URL como webhook de Telegram (`setWebhook`, ver
@@ -234,13 +283,7 @@ async def webhook_telegram(request: Request):
         return {"procesado": False}
 
     mensaje = _canal_telegram.receive()
-    respuesta_texto = handle_inbound_message(
-        _gateway,
-        patient_reference=mensaje.conversation_id,
-        channel=_canal_telegram.canal,
-        message_id=mensaje.message_id,
-        text=mensaje.text,
-    )
+    respuesta_texto = await _procesar_con_indicador_de_escritura(mensaje)
     try:
         _canal_telegram.send(OutboundMessage(conversation_id=mensaje.conversation_id, text=respuesta_texto))
     except TelegramChannelError as exc:
