@@ -508,6 +508,22 @@ class HealthBrain:
         # sin perder nada de lo ya elegido (`datos` se preserva íntegro
         # vía `{**datos, ...}`, solo se agrega/sobrescribe la etapa).
         if _contains_any(texto, _PARA_OTRO) and getattr(self._appointment_service, "buscar_paciente", None) is not None:
+            # Nota (recado 050): cuando este detector se reevalúa desde
+            # `gateway.py:_evaluar_ventana_de_gracia` sobre una Activity
+            # YA CERRADA con una reserva real ya ejecutada
+            # (`self._activity.appointment_id` no es `None`), el
+            # llamador puede decidir DESCARTAR esta respuesta y sustituirla
+            # por una que remita al flujo de cancelación ya existente y
+            # protegido por código de verificación, en vez de arrancar
+            # este wizard (que reservaría una SEGUNDA cita sin cancelar
+            # la primera). Esa decisión vive deliberadamente en
+            # `gateway.py`, no acá: distinguir "esto es sobre una cita
+            # NUEVA" de "esto es una corrección sobre la que se acaba de
+            # hacer" requiere cruzar esta señal con `classify_intent_or_none`
+            # (capa de dominio/gateway, nunca del Brain — ver docstring
+            # de `_evaluar_ventana_de_gracia`). Este método sigue
+            # devolviendo siempre la misma respuesta de siempre — cero
+            # cambio de comportamiento para el camino normal (recado 047).
             nuevos = {
                 **datos,
                 "etapa": "esperando_documento_beneficiario",

@@ -38,6 +38,7 @@ from .agent import HealthAgentContext, build_health_agent_context, handle_patien
 from .appointment_service import AppointmentService, AppointmentStatus
 from .confirmation import ConfirmationTracker
 from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
+from .intent import _PROGRAMAR as _PALABRAS_PROGRAMAR_CITA
 from .intent import _sin_tildes as _sin_tildes_menu
 from .intent import classify_intent_or_none
 from .models import Activity, ActivityStatus, PatientRequest, RequestIntent, RequestStatus
@@ -361,6 +362,19 @@ class HealthGateway:
     # GENUINAMENTE nuevo, más adelante, sí vuelva a ver el saludo
     # completo — igual que ya pasa hoy para el camino de intención clara.
     _saludo_mostrado: set = field(default_factory=set)
+    # Recado 050 — ventana de gracia de UN turno: patient_reference ->
+    # activity_id de la Activity que se acaba de cerrar en
+    # `_cerrar_si_definitivo` (reserva confirmada, reprogramada o
+    # declinada). El SIGUIENTE mensaje de ese paciente se reevalúa
+    # contra el detector centralizado de interrupciones de contexto
+    # (`HealthBrain._detectar_interrupcion_de_contexto`, recado 047)
+    # ANTES de tratarse como una solicitud 100% nueva — ver
+    # `_evaluar_ventana_de_gracia`. Se consume (se hace `pop`) en esa
+    # misma evaluación, coincida o no con ninguna interrupción: nunca
+    # dura más de un turno, sin necesidad de tiempo real ni TTL (mismo
+    # criterio "más simple posible" que el resto de los flags de este
+    # dataclass, ej. `_saludo_mostrado`).
+    _recien_cerrada: Dict[str, str] = field(default_factory=dict)
 
 
 def build_health_gateway(
@@ -501,8 +515,22 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
         # en agent.py, sin tocar).
         respuesta = handle_patient_message(contexto_existente, message_id, text)
         _procesar_olvido_si_corresponde(gateway, patient_reference, contexto_existente)
-        _cerrar_si_definitivo(gateway, contexto_existente)
+        _cerrar_si_definitivo(gateway, patient_reference, contexto_existente)
         return respuesta
+
+    # Ventana de gracia de un turno (recado 050, corrige el hallazgo del
+    # recado 049): NO hay conversación abierta — puede ser porque nunca
+    # existió, o porque una Activity de este paciente ACABA de cerrarse
+    # en el turno anterior (`_cerrar_si_definitivo`). En ese segundo
+    # caso, antes de tratar este mensaje como una solicitud 100% nueva,
+    # se reevalúa contra las 5 categorías de interrupción de contexto
+    # del recado 047. Se consume en la misma llamada (nunca dura más de
+    # este turno) y no interfiere con el gate de identidad de abajo: si
+    # el paciente ya tenía identidad resuelta (la tenía, si llegó a
+    # cerrar una conversación), sigue resuelta igual.
+    respuesta_ventana_de_gracia = _evaluar_ventana_de_gracia(gateway, patient_reference, message_id, text)
+    if respuesta_ventana_de_gracia is not None:
+        return respuesta_ventana_de_gracia
 
     # Gate de identidad (recado 012, R-15): solo aplica cuando (a) el
     # AppointmentService activo distingue el identificador de canal del
@@ -750,7 +778,7 @@ def _resolver_programar_cita(gateway: HealthGateway, request: PatientRequest, ch
     # duplica la lógica de reserva, solo se elige qué primer mensaje
     # alimentarle al mismo Brain.
     respuesta = handle_patient_message(context, message_id, "sí")
-    if _cerrar_si_definitivo(gateway, context):
+    if _cerrar_si_definitivo(gateway, request.patient_reference, context):
         gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
     return respuesta
 
@@ -817,7 +845,7 @@ def _resolver_gestion_de_cita_existente(
     # PROGRAMAR_CITA (traducido a "sí").
     frase_canonica = "reprogramar la cita" if request.intent == RequestIntent.REPROGRAMAR_CITA else "cancelar la cita"
     respuesta = handle_patient_message(context, message_id, frase_canonica)
-    if _cerrar_si_definitivo(gateway, context):
+    if _cerrar_si_definitivo(gateway, request.patient_reference, context):
         gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
     return respuesta
 
@@ -873,7 +901,7 @@ def _procesar_olvido_si_corresponde(gateway: HealthGateway, patient_reference: s
     )
 
 
-def _cerrar_si_definitivo(gateway: HealthGateway, context: HealthAgentContext) -> bool:
+def _cerrar_si_definitivo(gateway: HealthGateway, patient_reference: str, context: HealthAgentContext) -> bool:
     """Cierre determinista de una Activity SINTÉTICA (iniciada por el
     paciente, `source_system == 'PATIENT_INITIATED'`) apenas su turno
     llega a un desenlace definitivo — nunca se aplica a una Activity de
@@ -887,7 +915,22 @@ def _cerrar_si_definitivo(gateway: HealthGateway, context: HealthAgentContext) -
     transacción puntual, a diferencia de una campaña de demanda inducida
     que sigue en curso días después a través de sus propios
     recordatorios. Reutiliza `finalize_and_report` (agent.py) sin
-    tocarla."""
+    tocarla.
+
+    `patient_reference` (recado 050, parámetro NUEVO, antes se usaba
+    `context.activity.patient_reference` directo): con el gate de
+    identidad activo (012/R-15, canales cuyo identificador NO es el
+    documento — ej. WhatsApp), `context.activity.patient_reference` es
+    el DOCUMENTO ya resuelto, distinto del identificador de CANAL con el
+    que `_open_conversations`/`_saludo_mostrado`/`_recien_cerrada` están
+    indexados en cualquier otro punto de este archivo (`register_context`
+    los indexa explícitamente por el `patient_reference` de canal que le
+    pasa el llamador). Usar `context.activity.patient_reference` acá
+    hacía que estos `pop`/`discard` fueran, en ese escenario, un no-op
+    silencioso (`find_open_context` igual se autocorregía en la
+    siguiente consulta) — inofensivo hasta ahora, pero la ventana de
+    gracia nueva (`_recien_cerrada`, abajo) si necesita la clave
+    correcta para que `_evaluar_ventana_de_gracia` la encuentre."""
     if context.activity.source_system != "PATIENT_INITIATED":
         return False
     if context.activity.status in _ACTIVITY_ESTADOS_CERRADOS:
@@ -902,14 +945,216 @@ def _cerrar_si_definitivo(gateway: HealthGateway, context: HealthAgentContext) -
         ManagementStatus.DECLINED,
     ):
         finalize_and_report(context)
-        gateway._open_conversations.pop(context.activity.patient_reference, None)
+        gateway._open_conversations.pop(patient_reference, None)
         # Recado 048: libera también la marca de "saludo ya mostrado" —
         # un ciclo de conversación GENUINAMENTE nuevo, más adelante,
         # debe volver a ver el saludo institucional completo, igual que
         # ya pasaba para el camino de intención clara (arriba).
-        gateway._saludo_mostrado.discard(context.activity.patient_reference)
+        gateway._saludo_mostrado.discard(patient_reference)
+        # Recado 050 — ventana de gracia: registra esta Activity como
+        # "recién cerrada" para que el PRÓXIMO mensaje de este mismo
+        # paciente se reevalúe contra las 5 categorías de interrupción
+        # de contexto antes de tratarse como una solicitud nueva (ver
+        # `_evaluar_ventana_de_gracia`). Deliberadamente NO se hace
+        # `gateway._contexts.pop(...)` acá — a diferencia de
+        # `_open_conversations`, el contexto sigue vivo en `_contexts`
+        # (ya lo estaba antes de este recado, sin cambios) precisamente
+        # para que la ventana de gracia pueda recuperarlo.
+        gateway._recien_cerrada[patient_reference] = context.activity.activity_id
         return True
     return False
+
+
+def _evaluar_ventana_de_gracia(
+    gateway: HealthGateway, patient_reference: str, message_id: str, text: str
+) -> Optional[str]:
+    """Recado 050 — hallazgo real de producción (recado 049): apenas
+    `_cerrar_si_definitivo` cierra una Activity, el siguiente mensaje
+    del paciente ya no encuentra `find_open_context` y se enruta por
+    `_enrutar_solicitud_nueva`, que NUNCA conoce el detector de las 5
+    categorías de interrupción de contexto (`_PARA_OTRO`,
+    `_INFO_NO_AUTORIZADA`, `_HUMANO`, `_NO_PUEDE_AHORA`, `_PIDE_INFO`,
+    recado 047) — vive únicamente dentro de `HealthBrain.interpret()`,
+    solo alcanzable con una conversación abierta. Esta función
+    reevalúa ESE MISMO detector (reutilizado tal cual vía
+    `Orchestrator.brain`, nunca duplicado) sobre la Activity que se
+    acaba de cerrar, UNA sola vez (`pop`, nunca dura más de este turno).
+
+    Devuelve `None` si no aplica ventana de gracia, o si el mensaje NO
+    coincide con ninguna de las 5 categorías — en ambos casos el
+    llamador (`handle_inbound_message`) sigue con el enrutamiento
+    normal de una solicitud nueva, SIN NINGÚN cambio de comportamiento
+    (requisito explícito: una solicitud genuinamente nueva nunca se ve
+    afectada). Si SÍ coincide, devuelve la respuesta ya lista — este
+    turno termina ahí, sin crear ninguna Activity/PatientRequest nueva.
+
+    No reabre `_open_conversations`: el detector de estas 5 categorías
+    nunca propone `tool_requerida` (confirmado leyendo
+    `_detectar_interrupcion_de_contexto` — ninguna de sus 5 ramas
+    escribe contra `AppointmentService`), así que no hace falta
+    volver a ejecutar la maquinaria completa de `handle_patient_message`
+    (tools, recordatorios, etc.) — alcanza con actualizar el estado
+    guardado y devolver la respuesta, igual de real que si hubiera
+    pasado por el camino completo."""
+    activity_id = gateway._recien_cerrada.pop(patient_reference, None)
+    if activity_id is None:
+        return None
+    contexto_cerrado = gateway._contexts.get(activity_id)
+    if contexto_cerrado is None or contexto_cerrado.orchestrator is None:
+        return None
+    estado = contexto_cerrado.orchestrator.store.get(activity_id)
+    if estado is None:
+        return None
+
+    from .brain import _ETAPAS_SIN_INTERRUPCION_DE_CONTEXTO
+
+    datos = dict(estado.datos_recopilados)
+    etapa = datos.get("etapa", "esperando_decision")
+    if etapa in _ETAPAS_SIN_INTERRUPCION_DE_CONTEXTO:
+        return None
+
+    texto = text.lower().strip()
+    interrupcion = contexto_cerrado.orchestrator.brain._detectar_interrupcion_de_contexto(  # noqa: SLF001 — mismo paquete, ver docstring
+        texto, datos, etapa
+    )
+    if interrupcion is None:
+        return None
+
+    senales = interrupcion.senales_detectadas or []
+    texto_tiene_intencion_de_cita_nueva = any(k in texto for k in _PALABRAS_PROGRAMAR_CITA)
+    if (
+        "gestion_para_beneficiario_declarada" in senales
+        and contexto_cerrado.activity.appointment_id is not None
+        and not texto_tiene_intencion_de_cita_nueva
+    ):
+        # Recado 050, decisión de diseño explícita (pedida por el
+        # usuario, no improvisada — ver recado 050 para el análisis
+        # completo): distingue dos situaciones que el detector del
+        # Brain, por sí solo, no puede diferenciar (no tiene forma de
+        # saber si "para mi hija" es sobre una cita NUEVA o sobre la que
+        # se ACABA de reservar en esta misma Activity).
+        #
+        # Chequeo DIRECTO contra `intent.py:_PROGRAMAR` (las frases
+        # explícitas: "programar", "agendar", "necesito una cita", etc.)
+        # — DELIBERADAMENTE no se usa `classify_intent_or_none(text)`
+        # para esto: esa función solo devuelve `None` para un saludo
+        # PURO (recado 048); para cualquier otro texto sin ninguna
+        # palabra clave específica, sigue defaulteando a
+        # `PROGRAMAR_CITA` igual (recado 030, "el punto de entrada más
+        # seguro") — con ese default, AMBOS mensajes de ejemplo abajo
+        # clasificarían como PROGRAMAR_CITA, sin distinguir nada.
+        #
+        # - "dale gracias, necesito una cita para mi hija" (caso real
+        #   del recado 049, punto 1): SÍ contiene una frase explícita de
+        #   `_PROGRAMAR` ("necesito una cita") además de mencionar
+        #   beneficiario — es una solicitud nueva, separada de lo que se
+        #   acaba de cerrar. Acá NO se aplica este `if`, la respuesta
+        #   normal del Brain (wizard de beneficiario) sigue de largo,
+        #   sin cambios.
+        # - "pero es para mi hija y no me preguntaste su documento"
+        #   (caso real del recado 049, punto 3): NO contiene ninguna
+        #   frase de `_PROGRAMAR` — es una corrección/reclamo sobre la
+        #   reserva que la Activity recién cerrada ya ejecutó de verdad
+        #   contra hrmm-backend (`appointment_id` real).
+        #
+        # Para el segundo caso, arrancar el wizard normal de beneficiario
+        # reservaría una SEGUNDA cita sin cancelar la primera —
+        # quedarían dos citas, una a nombre equivocado y libre, peor que
+        # el bug original. Tampoco se reasigna `documento_paciente` de
+        # la cita ya creada en silencio: no existe ningún endpoint de
+        # hrmm-backend para eso. Y con `HrmmAppointmentService` real,
+        # cancelar SIEMPRE exige el código de verificación —
+        # `HealthBrain._cancelar` ya documenta que ese camino es
+        # inalcanzable con un servicio real; el paciente real cancela
+        # exclusivamente por `_procesar_intento_de_codigo`, más abajo en
+        # este archivo. Escribir contra producción sin pasar por esa
+        # verificación saltaría la misma protección que ya existe para
+        # cualquier otra cancelación real.
+        #
+        # Por eso, en este caso, se DESCARTA la respuesta del Brain
+        # (que habría arrancado el wizard) y se sustituye por un mensaje
+        # que informa con claridad y remite al mismo camino de
+        # cancelación ya existente y ya protegido (la frase exacta
+        # "cancelar la cita", reconocida tanto por `HealthBrain._CANCELAR`
+        # como por `intent.py:RequestIntent.CANCELAR_CITA`) — nunca se
+        # ejecuta ni se propone ninguna escritura nueva acá. `etapa`
+        # queda en "finalizada": es una respuesta de un solo turno, no
+        # abre ningún wizard.
+        nuevos_datos = {**datos, "etapa": "finalizada"}
+        respuesta = (
+            "Entiendo — la cita que se acabó de confirmar quedó reservada a tu nombre, no al de "
+            "la persona para quien es. Para corregirlo hay que cancelar esa cita y reservar una "
+            "nueva a nombre de la persona correcta; por seguridad, cancelar requiere el mismo "
+            "código de verificación que te pedimos siempre. Si quieres, dime \"cancelar la cita\" "
+            "y seguimos con eso."
+        )
+        estado_actualizado = estado.model_copy(update={"datos_recopilados": nuevos_datos})
+        contexto_cerrado.orchestrator.store.save(estado_actualizado, expected_version=estado.version)
+        contexto_cerrado.orchestrator.events.record(
+            activity_id, EventType.STATE_TRANSITION,
+            evento="BENEFICIARIO_DECLARADO_TRAS_RESERVA_YA_EJECUTADA",
+        )
+        return respuesta
+
+    actualizacion = interrupcion.propuesta_de_actualizacion_de_estado or {}
+    nuevos_datos = actualizacion.get("datos_recopilados", datos)
+    reabre_wizard_de_beneficiario = nuevos_datos.get("etapa") == "esperando_documento_beneficiario"
+    cambios_estado: Dict[str, Any] = {"datos_recopilados": nuevos_datos}
+    if reabre_wizard_de_beneficiario:
+        # `estado.fase_actual` sigue en `FaseActual.CIERRE` (así quedó
+        # al cerrarse la Activity) — sin corregirlo acá, el turno
+        # SIGUIENTE (el documento del beneficiario, procesado por el
+        # camino normal `handle_patient_message` -> `Orchestrator.
+        # handle_message`) encontraría `fase_actual == CIERRE` y
+        # `_reabrir_ciclo` (core/orchestrator.py) BORRARÍA por completo
+        # `datos_recopilados` de vuelta a `{}` antes de que
+        # `HealthBrain.interpret()` llegue a verlo — perdiendo el
+        # "esperando_documento_beneficiario"/`etapa_antes_de_beneficiario`
+        # que se acaba de guardar acá (encontrado probando este mismo
+        # caso, no supuesto). `RECOPILACION_DE_DATOS` es la fase real en
+        # la que ya vive cualquier etapa "esperando_X" en curso — no una
+        # fase inventada para este caso.
+        cambios_estado["fase_actual"] = FaseActual.RECOPILACION_DE_DATOS
+    estado_actualizado = estado.model_copy(update=cambios_estado)
+    contexto_cerrado.orchestrator.store.save(estado_actualizado, expected_version=estado.version)
+    # Nota: deliberadamente NO se toca `orchestrator.memory` acá —
+    # `Orchestrator` no expone un accesor de solo lectura para ella
+    # (a diferencia de `store`/`tools`/`events`/`brain`, recado 050) y
+    # agregar uno solo para este registro secundario ampliaría el
+    # alcance sin necesidad real: ninguna de las 5 categorías de
+    # interrupción vuelve a leer `recent_turns`, así que no hace falta
+    # para que esta respuesta sea correcta.
+    contexto_cerrado.orchestrator.events.record(
+        activity_id, EventType.STATE_TRANSITION, evento="INTERRUPCION_EN_VENTANA_DE_GRACIA",
+        senales=list(interrupcion.senales_detectadas or []),
+    )
+    if reabre_wizard_de_beneficiario:
+        # Único de las 5 categorías cuya respuesta arranca un wizard de
+        # VARIOS turnos (documento -> confirmación -> retomar) — las
+        # otras 4 terminan en un desenlace de un solo turno (escalada,
+        # finalizada, o sin cambio de etapa). Sin re-registrar acá, el
+        # turno SIGUIENTE del paciente (el documento del beneficiario)
+        # ya no encontraría conversación abierta (la ventana de gracia
+        # ya se consumió arriba, es de un solo uso) y se malinterpretaría
+        # como una solicitud nueva. Mismo mecanismo de correlación de
+        # siempre (`register_context`), nada nuevo.
+        #
+        # No alcanza con re-registrar `_open_conversations`/`_contexts`:
+        # `find_open_context` ADEMÁS exige que `activity.status` no esté
+        # en `_ACTIVITY_ESTADOS_CERRADOS` — `finalize_and_report` ya lo
+        # había dejado en `COMPLETED` al cerrar. Sin revertirlo acá, el
+        # turno siguiente encontraría la entrada recién re-registrada
+        # pero la vería "vieja" de nuevo (mismo camino de autolimpieza
+        # que usa `find_open_context` para cualquier Activity realmente
+        # abandonada) y la volvería a descartar. `IN_PROGRESS` es el
+        # mismo estado que `accept_activity` deja al aceptar cualquier
+        # Activity nueva — no es un estado inventado para este caso.
+        contexto_cerrado.activity = contexto_cerrado.activity.model_copy(
+            update={"status": ActivityStatus.IN_PROGRESS}
+        )
+        contexto_cerrado.activity_source.update(contexto_cerrado.activity)
+        register_context(gateway, patient_reference, contexto_cerrado)
+    return interrupcion.respuesta_propuesta
 
 
 def _resolver_consulta(gateway: HealthGateway, request: PatientRequest) -> str:

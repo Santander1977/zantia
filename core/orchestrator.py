@@ -100,6 +100,17 @@ class Orchestrator:
         return self._events
 
     @property
+    def brain(self) -> Brain:
+        # Recado 050 — expone el `Brain` ya construido (solo lectura,
+        # mismo criterio que `tools`/`events`/`store` arriba) para que
+        # `domains/health/gateway.py` pueda reevaluar el detector
+        # centralizado de interrupciones de contexto
+        # (`HealthBrain._detectar_interrupcion_de_contexto`) sobre una
+        # Activity YA CERRADA, durante la ventana de gracia de un turno
+        # — sin duplicar esa lógica de detección fuera del Brain.
+        return self._brain
+
+    @property
     def store(self) -> StateStore:
         return self._store
 
