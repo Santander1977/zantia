@@ -249,3 +249,37 @@ def test_mensaje_no_reconocido_incluye_la_opcion_de_salir():
 
     assert "5. salir" in _MENU_NUMERADO.lower()
     assert "salir" in _MENSAJE_INTENCION_NO_RECONOCIDA.lower()
+
+
+# ---------------------------------------------------------------------
+# 7. Recado 060 — hallazgo urgente de producción real: tras usar la
+#    opción "5" del menú (SALIR sin conversación abierta, sección 6
+#    arriba), un "Hola" siguiente quedaba atrapado repitiendo
+#    `_MENSAJE_INTENCION_NO_RECONOCIDA` en vez de mostrar el saludo
+#    institucional completo de nuevo. Causa raíz: a diferencia del
+#    cierre de una Activity REAL (`_cerrar_si_definitivo`, que libera
+#    `_saludo_mostrado`), la rama `RequestIntent.SALIR` de
+#    `_resolver_por_intent` nunca hay Activity que cerrar (se alcanza
+#    SIN conversación abierta), así que nadie liberaba esa marca —
+#    `patient_reference` seguía marcado como "ya se le mostró el saludo"
+#    desde el turno anterior, para siempre.
+# ---------------------------------------------------------------------
+def test_hola_despues_de_opcion_salir_muestra_saludo_institucional_completo():
+    gateway = build_health_gateway(
+        MockActivitySource(), MockAppointmentService(), ReminderManager(), MockActivityResultSink()
+    )
+    ref = "PAC-SALIR-LUEGO-HOLA-060"
+    r1 = handle_inbound_message(gateway, ref, "demo", "m1", "hola")
+    assert "1. reservar una cita" in r1.lower(), f"m1 debía mostrar el menú: {r1!r}"
+
+    r2 = handle_inbound_message(gateway, ref, "demo", "m2", "5")
+    assert "con gusto" in r2.lower()
+    assert find_open_context(gateway, ref) is None
+
+    r3 = handle_inbound_message(gateway, ref, "demo", "m3", "Hola")
+    assert "no logré identificar" not in r3.lower(), (
+        f"quedó atrapado en el error genérico tras la opción 5: {r3!r}"
+    )
+    assert "1. reservar una cita" in r3.lower(), (
+        f"debía mostrar el saludo institucional completo (con menú), no la variante corta: {r3!r}"
+    )

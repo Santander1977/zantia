@@ -791,6 +791,19 @@ def _resolver_por_intent(
         # conversación en curso, para que el texto sea idéntico en
         # ambos casos.
         gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
+        # Recado 060 (hallazgo urgente de producción real): como acá
+        # nunca hay una Activity que pase por `_cerrar_si_definitivo`,
+        # nadie liberaba la marca de "saludo ya mostrado" (a diferencia
+        # del cierre de una Activity real, línea ~1050) — un "Hola"
+        # inmediatamente después de esta despedida caía siempre a
+        # `_MENSAJE_INTENCION_NO_RECONOCIDA` (turno "ambiguo repetido"),
+        # nunca al saludo institucional completo, porque
+        # `patient_reference` seguía marcado desde antes de la despedida.
+        # Deliberadamente NO se toca `_cierre_reciente` acá (a diferencia
+        # de `_cerrar_si_definitivo`): esta despedida ya ES el saludo
+        # corto de cierre — el siguiente "Hola" debe volver a ver el
+        # guion institucional completo, no la variante corta de regreso.
+        gateway._saludo_mostrado.discard(patient_reference)
         return _texto_despedida(_nombre_conocido(gateway, patient_reference))
 
     if intent == RequestIntent.INFORMACION_SERVICIO:
