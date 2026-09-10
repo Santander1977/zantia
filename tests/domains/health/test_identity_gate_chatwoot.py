@@ -221,3 +221,111 @@ def test_limite_de_intentos_fallidos_escala(hrmm_gateway):
     # queda atascado sin salida.
     r4 = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m5", "hola de nuevo")
     assert "documento" in r4.lower()
+
+
+# ---------------------------------------------------------------------
+# Recado 063 — mismo hallazgo urgente del recado 062, encontrado esta
+# vez en el gate de identidad de canal (la puerta de entrada de
+# CUALQUIER paciente nuevo por un canal sin documento explícito, ej.
+# WhatsApp/Chatwoot). Reutiliza el MISMO clasificador compartido
+# (`_clasificar_interrupcion_wizard`, gateway.py) — no una copia.
+# ---------------------------------------------------------------------
+def _gateway_con_http(citas_por_documento=None):
+    http = FakeHttpClient(generador=_generador(citas_por_documento))
+    catalog = CatalogMirror()
+    catalog.sync(http)
+    service = HrmmAppointmentService(http, catalog)
+    gateway = build_health_gateway(MockActivitySource(), service, ReminderManager(), MockActivityResultSink())
+    return gateway, http
+
+
+def test_wizard_identidad_no_queda_atrapado_esperando_codigo(monkeypatch):
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+    gateway, http = _gateway_con_http(citas_por_documento={_DOCUMENTO_VALIDO: []})
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m1", "hola quiero una cita")
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m2", _DOCUMENTO_VALIDO)
+    assert gateway._pending_identity[_TELEFONO]["stage"] == "esperando_codigo"
+
+    r_correo = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m3", "¿a cuál correo lo enviaron?")
+    assert "no es válido" not in r_correo.lower() and "no válido" not in r_correo.lower()
+    assert "p***@dominio.com" in r_correo
+    assert _TELEFONO in gateway._pending_identity  # sigue esperando el código
+
+    r_reenvio = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m4", "no me llegó, reenviarme otro")
+    assert "no es válido" not in r_reenvio.lower() and "no válido" not in r_reenvio.lower()
+    assert "reenviamos" in r_reenvio.lower()
+    assert sum(1 for c in http.llamadas if c["path"] == "/api/agenda/verificacion/enviar") == 2
+
+    # Seguridad (requisito #4/decisión explícita, ver docstring de
+    # `_MENSAJE_CITAS_ANTES_DE_VERIFICAR`): NO revela ninguna cita real
+    # antes de confirmar el segundo factor — solo redirige.
+    r_citas = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m5", "cuales tengo reservadas")
+    assert "no es válido" not in r_citas.lower() and "no válido" not in r_citas.lower()
+    assert "cita activa" not in r_citas.lower()
+    assert "confirmemos tu identidad" in r_citas.lower()
+    assert _TELEFONO not in gateway._identidad_resuelta  # sigue sin identidad real
+
+    r_salir = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m6", "salir")
+    assert "no es válido" not in r_salir.lower() and "no válido" not in r_salir.lower()
+    assert _TELEFONO not in gateway._pending_identity  # sin estado residual
+    assert _TELEFONO not in gateway._identidad_resuelta  # nunca quedó "medio identificado"
+
+
+def test_salir_durante_gate_de_identidad_vuelve_al_punto_de_partida(monkeypatch):
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+    gateway, http = _gateway_con_http(citas_por_documento={_DOCUMENTO_VALIDO: []})
+
+    # "salir" incluso ANTES de escribir ningún documento (stage
+    # esperando_documento) — no debe tratarse como un documento inválido.
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m1", "hola")
+    r_salir_temprano = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m2", "exit")
+    assert "no encontré" not in r_salir_temprano.lower()
+    assert _TELEFONO not in gateway._pending_identity
+    assert _TELEFONO not in gateway._identidad_resuelta
+
+    # Reintentar desde cero: vuelve a pedir documento, limpio.
+    respuesta_reintento = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m3", "hola de nuevo")
+    assert "documento" in respuesta_reintento.lower()
+    assert gateway._pending_identity[_TELEFONO]["stage"] == "esperando_documento"
+
+    # Y "salir" también funciona en esperando_codigo (documento ya
+    # validado, código enviado) — mismo resultado: sin estado residual.
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m4", _DOCUMENTO_VALIDO)
+    assert gateway._pending_identity[_TELEFONO]["stage"] == "esperando_codigo"
+    r_salir_tardio = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m5", "cancelar esto")
+    assert _TELEFONO not in gateway._pending_identity
+    assert _TELEFONO not in gateway._identidad_resuelta
+    registro = gateway.identity_store.get(_TELEFONO)
+    # La fila PENDIENTE_VERIFICACION puede quedar huérfana en
+    # identity_store (inofensiva, nunca otorga acceso) — lo que importa
+    # es que NUNCA quede VERIFICADO sin el segundo factor.
+    assert registro is None or registro.estado.value != "VERIFICADO"
+
+
+def test_wizard_identidad_reconoce_expresiones_con_errores_de_tipeo(monkeypatch):
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+    gateway, http = _gateway_con_http(citas_por_documento={_DOCUMENTO_VALIDO: []})
+
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m1", "hola")
+    r_emocional_sin_documento = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m2", "Estoy tristw")
+    assert "no encontré" not in r_emocional_sin_documento.lower()
+    assert "lamento" in r_emocional_sin_documento.lower()
+    assert gateway._pending_identity[_TELEFONO]["stage"] == "esperando_documento"  # no perdió el progreso
+
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m3", _DOCUMENTO_VALIDO)
+    r_emocional_con_codigo = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m4", "Estoy tristw")
+    assert "no es válido" not in r_emocional_con_codigo.lower() and "no válido" not in r_emocional_con_codigo.lower()
+    assert "lamento" in r_emocional_con_codigo.lower()
+    assert gateway._pending_identity[_TELEFONO]["stage"] == "esperando_codigo"
+
+
+def test_codigo_y_documento_reales_siguen_funcionando_sin_confundirse_con_un_comando(monkeypatch):
+    """Control anti-regresión: un documento/código real (numérico)
+    nunca puntúa alto contra ninguna frase de las listas nuevas (ver
+    recado 062 para la verificación empírica del umbral)."""
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+    gateway, http = _gateway_con_http(citas_por_documento={_DOCUMENTO_VALIDO: []})
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m1", "hola")
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m2", _DOCUMENTO_VALIDO)
+    respuesta = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m3", _CODIGO_VALIDO)
+    assert "confirmé tu identidad" in respuesta.lower()

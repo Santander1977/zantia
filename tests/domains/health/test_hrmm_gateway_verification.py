@@ -10,7 +10,7 @@ secretos reales). Verifica que:
 import pytest
 
 from domains.health import MockActivitySource, MockActivityResultSink, ReminderManager
-from domains.health.gateway import build_health_gateway, handle_inbound_message
+from domains.health.gateway import build_health_gateway, find_open_context, handle_inbound_message
 from domains.health.hrmm_appointment_service import HrmmAppointmentService
 from domains.health.hrmm_catalog import CatalogMirror
 from domains.health.hrmm_http import FakeHttpClient, HttpResponse
@@ -197,6 +197,124 @@ def test_reprogramar_sin_disponibilidad_no_promete_contacto(monkeypatch):
     assert "te contactamos" not in respuesta.lower()
     assert "no tengo otros horarios disponibles" in respuesta.lower()
     assert "999" not in gateway._pending_verifications
+
+
+# ---------------------------------------------------------------------
+# Recado 062 — hallazgo urgente de producción real: este wizard era un
+# callejón sin salida genuino. CUALQUIER mensaje que no fuera el código
+# exacto de 6 dígitos (o el ordinal de una opción) se trataba como
+# "código inválido" — incluidas preguntas legítimas, pedidos de
+# reenvío, e intentos explícitos de salir. Nota de transparencia: el
+# usuario adjuntó una transcripción real de 5 mensajes atrapados que no
+# llegó a este contexto (sin contenido visible) — esta reproducción usa
+# las frases EXACTAS que sí quedaron citadas textualmente en el pedido
+# ("¿a cuál email enviaron?", "reenviarme otro", "Salir", "Exit"), no
+# una transcripción inventada.
+# ---------------------------------------------------------------------
+def test_wizard_no_queda_atrapado_reproduce_los_mensajes_reales_reportados(hrmm_gateway):
+    gateway, http = hrmm_gateway(
+        citas_por_documento={"999": [_CITA_BASE]},
+        extra={
+            ("POST", "/api/agenda/verificacion/enviar"): lambda p, j: HttpResponse(
+                200, {"enviado": True, "correo_parcial": "a***@dominio.com"}
+            ),
+            ("POST", "/api/agenda/citas/C1/cancelar"): lambda p, j: HttpResponse(
+                200, dict(_CITA_BASE, estado="cancelada")
+            ),
+        },
+    )
+    handle_inbound_message(gateway, "999", "demo", "m1", "quiero cancelar mi cita")
+
+    r1 = handle_inbound_message(gateway, "999", "demo", "m2", "¿a cuál email enviaron?")
+    assert "no es válido" not in r1.lower() and "no válido" not in r1.lower()
+    assert "a***@dominio.com" in r1
+    assert "999" in gateway._pending_verifications  # sigue esperando el código, no se perdió
+
+    r2 = handle_inbound_message(gateway, "999", "demo", "m3", "reenviarme otro")
+    assert "no es válido" not in r2.lower() and "no válido" not in r2.lower()
+    assert "reenviamos" in r2.lower()
+    assert sum(1 for c in http.llamadas if c["path"] == "/api/agenda/verificacion/enviar") == 2
+    assert "999" in gateway._pending_verifications
+
+    r3 = handle_inbound_message(gateway, "999", "demo", "m4", "Salir")
+    assert "no es válido" not in r3.lower() and "no válido" not in r3.lower()
+    assert "999" not in gateway._pending_verifications  # abortó de verdad, sin estado residual
+
+    # "Exit" reportado por separado — mismo mecanismo, wizard nuevo.
+    handle_inbound_message(gateway, "998", "demo", "m1", "quiero cancelar mi cita")
+    r4 = handle_inbound_message(gateway, "998", "demo", "m2", "Exit")
+    assert "no es válido" not in r4.lower() and "no válido" not in r4.lower()
+    assert "998" not in gateway._pending_verifications
+
+
+def test_salir_del_wizard_no_deja_estado_residual_y_permite_reintentar_limpio(hrmm_gateway):
+    """Recado 060/061 (bug de '_saludo_mostrado' tras la opción 5) puso
+    en evidencia el mismo tipo de riesgo: un abort debe limpiar TODO su
+    propio estado, no solo devolver un texto de despedida."""
+    gateway, http = hrmm_gateway(
+        citas_por_documento={"999": [_CITA_BASE]},
+        extra={
+            ("POST", "/api/agenda/verificacion/enviar"): lambda p, j: HttpResponse(200, {"enviado": True}),
+            ("POST", "/api/agenda/citas/C1/cancelar"): lambda p, j: HttpResponse(
+                200, dict(_CITA_BASE, estado="cancelada")
+            ),
+        },
+    )
+    handle_inbound_message(gateway, "999", "demo", "m1", "quiero cancelar mi cita")
+    respuesta_salir = handle_inbound_message(gateway, "999", "demo", "m2", "salir")
+    assert "1. reservar una cita" in respuesta_salir.lower()
+    assert "999" not in gateway._pending_verifications
+    assert find_open_context(gateway, "999") is None
+
+    # Reintentar desde cero: debe volver a pedir código (estado limpio),
+    # nunca reutilizar ni confundirse con el wizard anterior.
+    respuesta_reintento = handle_inbound_message(gateway, "999", "demo", "m3", "cancelar mi cita")
+    assert "código" in respuesta_reintento.lower()
+    assert "999" in gateway._pending_verifications
+    assert gateway._pending_verifications["999"]["stage"] == "esperando_codigo"
+
+
+def test_wizard_reconoce_expresiones_con_errores_de_tipeo(hrmm_gateway):
+    gateway, http = hrmm_gateway(
+        citas_por_documento={"999": [_CITA_BASE]},
+        extra={
+            ("POST", "/api/agenda/verificacion/enviar"): lambda p, j: HttpResponse(200, {"enviado": True}),
+            ("POST", "/api/agenda/citas/C1/cancelar"): lambda p, j: HttpResponse(
+                200, dict(_CITA_BASE, estado="cancelada")
+            ),
+        },
+    )
+    handle_inbound_message(gateway, "999", "demo", "m1", "quiero cancelar mi cita")
+
+    r_emocional = handle_inbound_message(gateway, "999", "demo", "m2", "Estoy tristw")
+    assert "no es válido" not in r_emocional.lower() and "no válido" not in r_emocional.lower()
+    assert "lamento" in r_emocional.lower()
+    assert "999" in gateway._pending_verifications  # no aborta, solo acompaña
+
+    r_citas = handle_inbound_message(gateway, "999", "demo", "m3", "cuales tengo reservadas")
+    assert "no es válido" not in r_citas.lower() and "no válido" not in r_citas.lower()
+    assert "cita" in r_citas.lower()
+    assert "999" in gateway._pending_verifications
+
+
+def test_codigo_real_de_6_digitos_sigue_funcionando_sin_confundirse_con_un_comando(hrmm_gateway):
+    """Control anti-regresión: el detector nuevo NO debe interceptar un
+    código real solo porque comparte alguna letra/dígito por casualidad
+    — un código de 6 dígitos nunca puntúa alto contra ninguna frase de
+    las listas nuevas (verificado analíticamente antes de escribir este
+    test, ver recado 062)."""
+    gateway, http = hrmm_gateway(
+        citas_por_documento={"999": [_CITA_BASE]},
+        extra={
+            ("POST", "/api/agenda/verificacion/enviar"): lambda p, j: HttpResponse(200, {"enviado": True}),
+            ("POST", "/api/agenda/citas/C1/cancelar"): lambda p, j: HttpResponse(
+                200, dict(_CITA_BASE, estado="cancelada")
+            ),
+        },
+    )
+    handle_inbound_message(gateway, "999", "demo", "m1", "quiero cancelar mi cita")
+    respuesta = handle_inbound_message(gateway, "999", "demo", "m2", "654321")
+    assert "cancelada" in respuesta.lower()
 
 
 def test_pregunta_de_servicio_usa_el_catalogo_real_sincronizado_de_hrmm(monkeypatch):

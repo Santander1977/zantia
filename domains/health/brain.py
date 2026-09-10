@@ -152,6 +152,11 @@ _OLVIDAR = (
 _CONSULTA_CITAS_EXISTENTES = (
     "consultar mi cita", "consultar mis citas", "qué cita tengo", "que cita tengo",
     "cuándo es mi cita", "cuando es mi cita", "tengo alguna cita", "mis citas",
+    # Recado 062 — hallazgo real dentro del wizard de código de
+    # verificación (gateway.py): forma real usada por un paciente,
+    # ninguna variante existente la cubría ni siquiera sin errores de
+    # tipeo.
+    "cuales tengo reservadas", "qué tengo reservado", "que tengo reservado",
 )
 # Recado 058 — hallazgo real de producción: tras una reserva exitosa
 # ("...Te enviamos un correo de confirmación con todos los detalles."),
@@ -647,6 +652,52 @@ def _emparejar_servicio_por_similitud(texto: str, servicios: List[str]) -> Tuple
     if len(candidatos) >= 2:
         return None, candidatos
     return None, []
+
+
+# Recado 062 — generalización del MISMO mecanismo de arriba
+# (SequenceMatcher + ventanas de tokens, recado 036) para reutilizarlo
+# fuera de la elección de servicio: cualquier lista de frases cortas
+# conocidas, no solo el catálogo. Encontrado al conectar el wizard de
+# código de verificación (gateway.py) al reconocimiento de expresiones
+# emocionales/preguntas — un typo real de una sola letra ("tristw" por
+# "triste") no calzaba contra ninguna entrada exacta.
+#
+# Umbral 0.82 (el MISMO ya calibrado y documentado en el recado 036,
+# no uno nuevo inventado) — verificado con ejemplos reales de este
+# hallazgo: "Estoy tristw" contra "estoy triste" puntúa 0.917; "no me
+# llegoo" contra "no me llego" puntúa 0.957; "reenbiame el codigo"
+# contra "reenviame" puntúa 0.889; "a q correo lo enviaron" contra "a
+# que correo" puntúa 0.909 — todos con margen cómodo sobre 0.82. Un
+# código real de 6 dígitos contra cualquier frase de estas listas
+# puntúa 0.000 (alfabético vs. numérico), cero riesgo de que un código
+# real se confunda con un comando.
+_UMBRAL_FUZZY_FRASE = _UMBRAL_FUZZY_SERVICIO
+
+
+def _mejor_similitud_de_frase(tokens_texto: List[str], frase_normalizada: str) -> float:
+    """Mismo algoritmo que `_similitud_servicio` — genérico, sin
+    acoplarse a la semántica de "servicio"."""
+    palabras = frase_normalizada.split()
+    n = len(palabras)
+    if len(tokens_texto) < n:
+        ventanas = [" ".join(tokens_texto)]
+    else:
+        ventanas = [" ".join(tokens_texto[i : i + n]) for i in range(len(tokens_texto) - n + 1)]
+    return max(
+        (SequenceMatcher(None, ventana, frase_normalizada).ratio() for ventana in ventanas),
+        default=0.0,
+    )
+
+
+def _contains_any_fuzzy(texto: str, frases: tuple, umbral: float = _UMBRAL_FUZZY_FRASE) -> bool:
+    """Como `_contains_any_sin_tildes`, pero tolerante a errores de
+    tipeo reales (recado 062) — reutiliza el mismo mecanismo del
+    recado 036, generalizado a cualquier lista de frases cortas."""
+    tokens = _tokens_sin_puntuacion_de_borde(_sin_tildes(texto).lower())
+    return any(
+        _mejor_similitud_de_frase(tokens, _sin_tildes(frase).lower()) >= umbral
+        for frase in frases
+    )
 
 
 class HealthBrain:

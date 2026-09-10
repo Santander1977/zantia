@@ -36,7 +36,15 @@ from observability.events import EventType
 from .activity_source import ActivitySource
 from .agent import HealthAgentContext, build_health_agent_context, handle_patient_message
 from .appointment_service import AppointmentService, AppointmentStatus
-from .brain import _es_despedida, _formatear_fecha_humana, _lista_numerada, _texto_despedida
+from .brain import (
+    _CONSULTA_CITAS_EXISTENTES,
+    _EXPRESION_EMOCIONAL,
+    _contains_any_fuzzy,
+    _es_despedida,
+    _formatear_fecha_humana,
+    _lista_numerada,
+    _texto_despedida,
+)
 from .confirmation import ConfirmationTracker
 from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
 from .intent import _PROGRAMAR as _PALABRAS_PROGRAMAR_CITA
@@ -1293,23 +1301,21 @@ def _evaluar_ventana_de_gracia(
     return interrupcion.respuesta_propuesta
 
 
-def _resolver_consulta(gateway: HealthGateway, request: PatientRequest) -> str:
-    """CONSULTAR_CITA — respuesta determinista, directa desde
-    AppointmentService (nunca inventada, sin pasar por el Brain: es una
-    consulta de lectura pura, no requiere máquina de estados)."""
+def _listar_citas_activas(gateway: HealthGateway, documento: str) -> str:
+    """Recado 054 — mismo formato de lista numerada que
+    `HealthBrain._detectar_interrupcion_de_contexto` (misma categoría
+    "consultar mis citas") — debe verse idéntica al paciente sin
+    importar por cuál camino llegó. Extraída de `_resolver_consulta`
+    en el recado 062 para reutilizarse también dentro del wizard de
+    código de verificación (`_procesar_intento_de_codigo`), evitando
+    una tercera copia divergente de este mismo texto."""
     citas = [
         a
-        for a in gateway.appointment_service.get_patient_appointments(_documento_resuelto(gateway, request.patient_reference))
+        for a in gateway.appointment_service.get_patient_appointments(documento)
         if a.status in (AppointmentStatus.CONFIRMED, AppointmentStatus.RESCHEDULED)
     ]
-    gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
     if not citas:
         return "Revisé y no tienes ninguna cita activa registrada por este canal por ahora."
-    # Recado 054 — mismo formato de lista numerada que
-    # `HealthBrain._detectar_interrupcion_de_contexto` (misma categoría
-    # "consultar mis citas", alcanzada desde una etapa DISTINTA — primer
-    # contacto, sin conversación abierta todavía — pero debe verse
-    # idéntica al paciente sin importar por cuál camino llegó).
     plural = len(citas) != 1
     intro = (
         f"Aquí tienes tu{'s' if plural else ''} {len(citas)} "
@@ -1319,6 +1325,15 @@ def _resolver_consulta(gateway: HealthGateway, request: PatientRequest) -> str:
         f"{c.service} — {_formatear_fecha_humana(c.date)}, {c.time}, {c.location}" for c in citas
     ])
     return f"{intro}\n{lista_citas}"
+
+
+def _resolver_consulta(gateway: HealthGateway, request: PatientRequest) -> str:
+    """CONSULTAR_CITA — respuesta determinista, directa desde
+    AppointmentService (nunca inventada, sin pasar por el Brain: es una
+    consulta de lectura pura, no requiere máquina de estados)."""
+    texto = _listar_citas_activas(gateway, _documento_resuelto(gateway, request.patient_reference))
+    gateway.patient_request_source.update(request.model_copy(update={"status": RequestStatus.RESUELTA}))
+    return texto
 
 
 def _resolver_confirmacion(gateway: HealthGateway, request: PatientRequest) -> str:
@@ -1431,6 +1446,7 @@ def _enviar_codigo_y_pausar(
     except AppointmentServiceError as exc:
         return f"No pude enviar el código de verificación ({exc}). Intenta de nuevo en un momento."
 
+    correo_parcial = resultado_envio.get("correo_parcial")
     gateway._pending_verifications[patient_reference] = {
         "action": accion,
         "appointment_id": appointment_id,
@@ -1438,14 +1454,133 @@ def _enviar_codigo_y_pausar(
         "stage": "esperando_codigo",
         "new_slot_id": new_slot_id,
         "request_id": request_id,
+        # Recado 062 — antes se calculaba y se descartaba (solo vivía en
+        # el texto de esta respuesta): se guarda para poder responder
+        # "¿a qué correo?" más adelante sin volver a llamar al backend.
+        "correo_parcial": correo_parcial,
     }
-    correo_parcial = resultado_envio.get("correo_parcial")
     pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
     return f"Listo, te enviamos un código{pista} para confirmar. Escríbelo aquí para continuar cuando lo tengas."
 
 
+# Recado 062/063 — hallazgo urgente de producción real: los wizards
+# deterministas de este archivo (verificación de código para cancelar/
+# reprogramar, recado 062; gate de identidad de canal, recado 063) son
+# deliberadamente independientes de HealthBrain/ConversationState (ver
+# docstrings de cada uno) — por eso NUNCA pasaban por
+# `_detectar_interrupcion_de_contexto` (brain.py, recados 047/053) ni
+# por ningún otro detector de intención existente. CUALQUIER mensaje
+# que no fuera el dato exacto esperado (documento/código/ordinal) se
+# trataba como ese dato, inválido — incluyendo preguntas legítimas,
+# pedidos de reenvío, e intentos explícitos de salir: un callejón sin
+# salida real, confirmado con transcripciones reales en ambos casos.
+#
+# `_clasificar_interrupcion_wizard` es el clasificador PURO y
+# COMPARTIDO entre ambos wizards (mismo criterio de todo el proyecto:
+# un mecanismo, no dos copias) — sin efectos secundarios, sin acceso a
+# `gateway`, solo determina la categoría. Cada wizard decide QUÉ hacer
+# con esa categoría según su propio estado (dict distinto, acciones
+# disponibles distintas) — eso SÍ difiere entre los dos, a propósito:
+# ver `_procesar_intento_de_codigo` (recado 062) y
+# `_gestionar_identificacion` (recado 063, incluida la decisión de
+# seguridad explícita de NO revelar citas antes de confirmar el
+# segundo factor). NO se reutiliza `_detectar_interrupcion_de_contexto`
+# tal cual: esa función vive atada a `ConversationState`/
+# `resultado_de_herramientas`, que ninguno de estos dos wizards tiene,
+# por diseño explícito desde su creación (recado 009/012). Ver recado
+# 062 para la recomendación evaluada de conectar estos wizards al
+# mecanismo de interpretación asistida por LLM del recado 052
+# (`core/selection.py`) en vez de seguir agregando reglas una por una.
+_SALIR_WIZARD = ("salir", "cancelar esto", "exit", "ya no quiero", "olvidalo", "detente")
+_REENVIAR_CODIGO = (
+    "reenviar", "reenviame", "reenviarme", "reenviarlo", "no me llego", "no llego", "nunca llego",
+    "mandame otro", "manda otro", "otro codigo", "envia de nuevo", "enviame de nuevo",
+)
+_PREGUNTA_CORREO_WIZARD = (
+    "a que correo", "a cual correo", "a que email", "a cual email", "que correo", "cual correo",
+    "que email", "cual email", "donde lo enviaron", "adonde lo mandaron",
+)
+
+
+def _clasificar_interrupcion_wizard(texto: str) -> Optional[str]:
+    """Devuelve una de `"salir"`/`"reenviar"`/`"pregunta_correo"`/
+    `"consulta_citas"`/`"emocional"`, o `None` si el mensaje debe
+    seguir tratándose como el dato exacto que el wizard está esperando
+    (documento/código/ordinal) — comportamiento sin cambios en ese
+    caso. Tolerante a errores de tipeo reales vía `_contains_any_fuzzy`
+    (recado 036/062) en todas las categorías salvo "salir"
+    (deliberadamente por coincidencia exacta ampliada, nunca fuzzy: una
+    salida es una acción irreversible sin confirmación adicional — más
+    vale un falso negativo aquí, corregible con un segundo mensaje, que
+    un falso positivo que aborte un código/documento real en curso)."""
+    if any(frase in texto.lower() for frase in _SALIR_WIZARD):
+        return "salir"
+    if _contains_any_fuzzy(texto, _REENVIAR_CODIGO):
+        return "reenviar"
+    if _contains_any_fuzzy(texto, _PREGUNTA_CORREO_WIZARD):
+        return "pregunta_correo"
+    if _contains_any_fuzzy(texto, _CONSULTA_CITAS_EXISTENTES):
+        return "consulta_citas"
+    if _contains_any_fuzzy(texto, _EXPRESION_EMOCIONAL):
+        return "emocional"
+    return None
+
+
+def _reenviar_codigo(gateway: HealthGateway, pendiente: Dict[str, Any], documento: str) -> str:
+    """Compartida entre ambos wizards — recibe `documento` explícito
+    (cada uno lo guarda bajo una clave distinta en su propio dict:
+    `documento_paciente` vs. `documento_candidato`) y muta
+    `pendiente["correo_parcial"]` in-place, cualquiera sea el dict."""
+    from .appointment_service import AppointmentServiceError
+
+    try:
+        resultado_envio = gateway.appointment_service.send_verification_code(documento)
+    except AppointmentServiceError as exc:
+        return f"No pude reenviar el código ({exc}). Intenta de nuevo en un momento."
+    correo_parcial = resultado_envio.get("correo_parcial")
+    pendiente["correo_parcial"] = correo_parcial
+    pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
+    return f"Listo, te reenviamos un código nuevo{pista}. Escríbelo aquí cuando lo tengas."
+
+
+def _respuesta_pregunta_correo_wizard(pendiente: Dict[str, Any]) -> str:
+    correo_parcial = pendiente.get("correo_parcial")
+    pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
+    return f"Te enviamos el código{pista}. Cuando lo tengas, escríbelo aquí para continuar."
+
+
+def _respuesta_expresion_emocional_wizard() -> str:
+    return (
+        "Lamento que te sientas así. Cuando tengas el código que te enviamos, escríbelo aquí para "
+        "continuar — o dime 'salir' si prefieres no seguir con esto por ahora."
+    )
+
+
 def _procesar_intento_de_codigo(gateway: HealthGateway, patient_reference: str, text: str) -> str:
     pendiente = gateway._pending_verifications[patient_reference]
+    categoria = _clasificar_interrupcion_wizard(text)
+
+    if categoria == "salir":
+        del gateway._pending_verifications[patient_reference]
+        return f"De acuerdo, no seguimos con esto por ahora. ¿En qué más te ayudo?\n{_MENU_NUMERADO}"
+
+    # Las categorías siguientes solo tienen sentido una vez que ya se
+    # envió un código real (hay `correo_parcial`/algo que reenviar) —
+    # en "esperando_seleccion" (reprogramar, elegir horario) todavía no
+    # se ha enviado ningún código.
+    if categoria is not None and pendiente["stage"] == "esperando_codigo":
+        if categoria == "reenviar":
+            return _reenviar_codigo(gateway, pendiente, pendiente["documento_paciente"])
+        if categoria == "pregunta_correo":
+            return _respuesta_pregunta_correo_wizard(pendiente)
+        if categoria == "consulta_citas":
+            citas_texto = _listar_citas_activas(gateway, pendiente["documento_paciente"])
+            return (
+                f"{citas_texto}\n\nCuando tengas el código que te enviamos, escríbelo aquí para continuar "
+                "— o dime 'salir' si prefieres no seguir con esto por ahora."
+            )
+        if categoria == "emocional":
+            return _respuesta_expresion_emocional_wizard()
 
     if pendiente["stage"] == "esperando_seleccion":
         elegida = _elegir_opcion_ordinal(text, pendiente["opciones_slot_id"])
@@ -1580,6 +1715,47 @@ _MENSAJE_DOCUMENTO_NO_ENCONTRADO = (
     "No encontré ningún paciente registrado con ese documento — "
     "¿puedes revisarlo y escribírmelo de nuevo?"
 )
+# Recado 063 — hallazgo urgente de producción real, mismo patrón exacto
+# del recado 062 pero en la puerta de entrada del sistema (ver
+# docstring de `_gestionar_identificacion`). Decisión de diseño
+# explícita para "salir" acá (requisito #4, pensada, no improvisada):
+# `_gestionar_identificacion` SOLO se alcanza cuando
+# `patient_reference not in gateway._identidad_resuelta` (ver el gate
+# en `handle_inbound_message`) — es decir, mientras se está DENTRO de
+# este wizard, NUNCA hay ninguna identidad ya confiable, en NINGUNA
+# etapa (ni con el documento ya validado contra buscar-paciente: ese
+# validó que el documento EXISTE, no que la persona del otro lado del
+# canal es su dueña — para eso está el segundo factor). Por lo tanto no
+# existe ningún "estado intermedio razonable" que preservar al salir:
+# la única opción segura es la (a) que evaluaste — el paciente queda
+# sin identificar y vuelve al punto de partida, exactamente igual que
+# un contacto nuevo. `del gateway._pending_identity[...]` logra esto
+# sin dejar estado residual (mismo cuidado que el recado 060/061); el
+# registro PENDIENTE_VERIFICACION que pueda haber quedado en
+# `identity_store` (si ya se llegó a enviar un código) es inofensivo —
+# nunca otorga acceso por sí solo, y un intento futuro lo sobrescribe.
+_MENSAJE_SALIR_GESTION_IDENTIDAD = (
+    "De acuerdo, no seguimos con esto por ahora — como no llegamos a confirmar tu identidad, no pude "
+    "avanzar con ningún trámite en este canal. Cuando quieras retomarlo, escríbeme de nuevo."
+)
+# Recado 063 — decisión de seguridad explícita, NO improvisada: a
+# diferencia del wizard de cancelar/reprogramar (recado 062, donde la
+# identidad YA estaba confirmada antes de entrar al wizard), acá
+# `documento_candidato` solo pasó el primer factor (existe en
+# buscar-paciente) — mostrar citas reales antes de confirmar el
+# segundo factor (código por correo) socavaría la razón de ser de todo
+# este gate (recados 012/014): cualquiera que conozca o adivine un
+# documento ajeno podría ver sus citas sin haber demostrado ser su
+# dueño. Se reconoce la pregunta (no cae en "código inválido"), pero
+# se redirige — nunca se contestan datos reales todavía.
+_MENSAJE_CITAS_ANTES_DE_VERIFICAR = (
+    "Con gusto te muestro tus citas apenas confirmemos tu identidad — escribe el código que te "
+    "enviamos para continuar, o dime 'salir' si prefieres no seguir con esto por ahora."
+)
+_MENSAJE_EMOCIONAL_ESPERANDO_DOCUMENTO = (
+    "Lamento que te sientas así. Para poder ayudarte necesito primero confirmar tu documento de "
+    "identidad — ¿me lo compartes cuando puedas? O dime 'salir' si prefieres no continuar por ahora."
+)
 
 
 def _requiere_identidad_real(gateway: HealthGateway) -> bool:
@@ -1631,6 +1807,24 @@ def _gestionar_identificacion(gateway: HealthGateway, patient_reference: str, ch
             "channel": channel, "intentos": 0, "stage": "esperando_documento",
         }
         return _MENSAJE_PEDIR_DOCUMENTO
+
+    categoria = _clasificar_interrupcion_wizard(text)
+    if categoria == "salir":
+        del gateway._pending_identity[patient_reference]
+        return _MENSAJE_SALIR_GESTION_IDENTIDAD
+
+    if categoria is not None and pendiente.get("stage") == "esperando_codigo":
+        if categoria == "reenviar":
+            return _reenviar_codigo(gateway, pendiente, pendiente["documento_candidato"])
+        if categoria == "pregunta_correo":
+            return _respuesta_pregunta_correo_wizard(pendiente)
+        if categoria == "consulta_citas":
+            return _MENSAJE_CITAS_ANTES_DE_VERIFICAR
+        if categoria == "emocional":
+            return _respuesta_expresion_emocional_wizard()
+
+    if categoria == "emocional" and pendiente.get("stage") == "esperando_documento":
+        return _MENSAJE_EMOCIONAL_ESPERANDO_DOCUMENTO
 
     if pendiente.get("stage") == "esperando_codigo":
         return _procesar_codigo_de_identificacion(gateway, patient_reference, pendiente, text)
@@ -1691,14 +1885,19 @@ def _iniciar_verificacion_de_identidad(
         return f"No pude enviarte el código de verificación ({exc}). Intenta de nuevo en un momento."
 
     canal_original = gateway._pending_identity[patient_reference]["channel"]
+    correo_parcial = resultado_envio.get("correo_parcial")
     gateway._pending_identity[patient_reference] = {
         "channel": canal_original,
         "intentos": 0,
         "stage": "esperando_codigo",
         "documento_candidato": documento,
         "nombre_candidato": nombre,
+        # Recado 063 — mismo hallazgo lateral que el recado 062: antes
+        # se calculaba solo para este texto y se descartaba, sin forma
+        # de responder "¿a qué correo?" más adelante sin llamar de
+        # nuevo al backend.
+        "correo_parcial": correo_parcial,
     }
-    correo_parcial = resultado_envio.get("correo_parcial")
     pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
     return f"Listo, te enviamos un código{pista} para confirmar tu identidad. Escríbelo aquí cuando lo tengas."
 
