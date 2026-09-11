@@ -28,7 +28,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 from observability.events import EventType
@@ -41,7 +41,9 @@ from .brain import (
     _EXPRESION_EMOCIONAL,
     _contains_any_fuzzy,
     _es_despedida,
+    _es_solicitud_de_salir,
     _formatear_fecha_humana,
+    _indice_ordinal_seguro,
     _lista_numerada,
     _texto_despedida,
 )
@@ -285,6 +287,34 @@ def _saludo_primer_contacto(nombre_conocido: Optional[str]) -> str:
 # regreso genuinamente nuevo (saludo completo de siempre).
 _VENTANA_SALUDO_CORTO = timedelta(minutes=30)
 
+# Recado 067 — enfriamiento de 2 minutos tras un cierre DEFINITIVO por
+# despedida/decline (nunca tras una reserva/reprogramación exitosa —
+# ver `_cerrar_si_definitivo`, campo `es_despedida`). Distinto del
+# saludo corto de arriba (30 min, sigue aplicando IGUAL después de este
+# enfriamiento — mismo timestamp, dos ventanas de tiempo anidadas: los
+# primeros 2 min están DENTRO de los 30) y de la ventana de gracia
+# (recado 050, reevalúa si el mensaje es una interrupción sobre lo
+# recién cerrado — deliberadamente NO se consulta mientras el
+# enfriamiento está activo: una despedida real ya cerró el tema, no
+# tiene sentido reinterrumpirlo). Duración fija de 2 minutos, pedida
+# explícitamente por el usuario.
+_VENTANA_ENFRIAMIENTO = timedelta(minutes=2)
+
+
+def _mensaje_enfriamiento(segundos_restantes: int) -> str:
+    """Recado 067 — decisión de diseño explícita (evaluada entre 3
+    alternativas, ver recado): NUNCA un cronómetro que se actualiza
+    solo (Telegram no lo soporta sin mandar mensajes repetidos, que se
+    sentiría como spam) — en vez de eso, se CALCULA el tiempo restante
+    real EN EL MOMENTO en que el paciente escribe de nuevo, contra el
+    timestamp real guardado (`_cierre_reciente`). Nunca miente: si
+    `segundos_restantes <= 0` (llegó a escribir justo en el límite),
+    no debería llamarse esta función — el llamador ya lo trata como
+    ventana vencida."""
+    if segundos_restantes <= 10:
+        return f"Ya casi — faltan {segundos_restantes} segundos para poder atenderte de nuevo."
+    return f"Aún faltan {segundos_restantes} segundos para poder atenderte de nuevo."
+
 
 def _saludo_corto_de_regreso(nombre_conocido: Optional[str]) -> str:
     """SIN presentación institucional ("Soy Andrés...") ni menú
@@ -450,7 +480,16 @@ class HealthGateway:
     # "¿ya lo saludé hace un momento?" — se consulta (nunca se hace
     # `pop`) cada vez que se necesita decidir el saludo; expira sola por
     # tiempo, no por uso.
-    _cierre_reciente: Dict[str, "tuple[datetime, Optional[str]]"] = field(default_factory=dict)
+    # Recado 067 — 3er campo `es_despedida` (antes solo `(momento,
+    # nombre)`): distingue un cierre por DECLINE/despedida (el paciente
+    # se va sin completar nada) de un cierre por reserva/reprogramación
+    # exitosa — SOLO el primero activa el enfriamiento de 2 minutos
+    # (`_VENTANA_ENFRIAMIENTO`, abajo); un paciente que acaba de
+    # confirmar una reserva real puede seguir escribiendo de inmediato,
+    # sin ningún bloqueo. MISMA tupla/timestamp reutilizado para ambos
+    # propósitos (enfriamiento de 2 min Y saludo corto de 30 min) —
+    # nunca un dict nuevo y paralelo.
+    _cierre_reciente: Dict[str, "tuple[datetime, Optional[str], bool]"] = field(default_factory=dict)
 
 
 def build_health_gateway(
@@ -597,6 +636,24 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
         _cerrar_si_definitivo(gateway, patient_reference, contexto_existente)
         return respuesta
 
+    # Recado 067 — enfriamiento de 2 minutos tras un cierre DEFINITIVO
+    # por despedida/decline (`_cierre_reciente[...][2]`, `es_despedida`
+    # — nunca tras una reserva/reprogramación exitosa). Deliberadamente
+    # ANTES de la ventana de gracia (abajo): una despedida real ya
+    # cerró el tema por completo — no tiene sentido reevaluar si el
+    # siguiente mensaje "es una interrupción sobre lo recién cerrado",
+    # y NUNCA debe caer en el fallback genérico de "no logré
+    # identificar" durante este período. Se calcula el tiempo restante
+    # REAL en este mismo instante contra el timestamp guardado — nunca
+    # un cronómetro que se actualiza solo (ver docstring de
+    # `_mensaje_enfriamiento`).
+    cierre_para_enfriamiento = gateway._cierre_reciente.get(patient_reference)
+    if cierre_para_enfriamiento is not None and cierre_para_enfriamiento[2]:
+        transcurrido = datetime.now(timezone.utc) - cierre_para_enfriamiento[0]
+        if transcurrido < _VENTANA_ENFRIAMIENTO:
+            segundos_restantes = int((_VENTANA_ENFRIAMIENTO - transcurrido).total_seconds()) + 1
+            return _mensaje_enfriamiento(segundos_restantes)
+
     # Ventana de gracia de un turno (recado 050, corrige el hallazgo del
     # recado 049): NO hay conversación abierta — puede ser porque nunca
     # existió, o porque una Activity de este paciente ACABA de cerrarse
@@ -690,7 +747,8 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
     # ahora devuelve `None` en ese caso exacto (ver docstring abajo).
     saludo_ya_mostrado = patient_reference in gateway._saludo_mostrado
     gateway._saludo_mostrado.add(patient_reference)
-    respuesta = _enrutar_solicitud_nueva(gateway, patient_reference, channel, message_id, text)
+    resultado_enrutamiento = _enrutar_solicitud_nueva(gateway, patient_reference, channel, message_id, text)
+    respuesta, es_cierre = resultado_enrutamiento if resultado_enrutamiento is not None else (None, False)
 
     # Recado 056, Punto 3 — si este paciente cerró una interacción hace
     # POCO tiempo (`_VENTANA_SALUDO_CORTO`), el saludo de apertura de
@@ -716,6 +774,15 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
         # de nuevo.
         return _MENSAJE_INTENCION_NO_RECONOCIDA if saludo_ya_mostrado else saludo_apertura
 
+    if es_cierre:
+        # Recado 067 — una despedida/cierre NUNCA lleva un saludo de
+        # bienvenida antepuesto, sin importar si es el primer turno de
+        # esta pre-conversación: "¡Buenas noches! ¿Puedo ayudarte en
+        # algo más?" + "¡Con gusto! Que tengas buen día..." en el mismo
+        # mensaje es contradictorio — el texto de despedida ya es, por
+        # sí solo, una respuesta completa y cerrada.
+        return respuesta
+
     if saludo_ya_mostrado:
         # Ya se le mostró el saludo en un turno ambiguo anterior de esta
         # misma "pre-conversación" (sin contexto todavía) — no se repite.
@@ -733,7 +800,7 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
 
 def _enrutar_solicitud_nueva(
     gateway: "HealthGateway", patient_reference: str, channel: str, message_id: str, text: str
-) -> Optional[str]:
+) -> Optional[Tuple[str, bool]]:
     """Clasifica y resuelve un mensaje SIN conversación previa abierta —
     extraído de `handle_inbound_message` (recado 034) para poder
     anteponerle un saludo con nombre cuando corresponde, sin repetir
@@ -779,19 +846,44 @@ def _enrutar_solicitud_nueva(
     de selección/clasificación asistida por LLM del recado 052
     (`_clasificar_solicitud_nueva_via_llm`) — sin proposer configurado
     (default de hoy), esto es un no-op inmediato, cero llamadas de red,
-    comportamiento IDÉNTICO al de antes de este recado."""
-    intent = _interpretar_opcion_menu(text) or classify_intent_or_none(text)
+    comportamiento IDÉNTICO al de antes de este recado.
+
+    Recado 067 — devuelve `(texto, es_cierre)` en vez de solo `texto`:
+    `es_cierre` es `True` únicamente cuando el intent resuelto fue
+    `RequestIntent.SALIR` (despedida en lenguaje natural, "salir"/
+    "exit", o la 5ta opción del menú) — `handle_inbound_message` lo usa
+    para NUNCA anteponerle un saludo de bienvenida a un mensaje de
+    despedida (hallazgo real: "¡Buenas noches! ¿Puedo ayudarte en algo
+    más?" + "¡Con gusto! Que tengas buen día..." concatenados en el
+    mismo turno, contradictorios entre sí).
+
+    Recado 067 — hallazgo real ADICIONAL de la misma investigación:
+    "gracias ya no necesito mas" está LITERALMENTE en `_DESPEDIDA`, pero
+    `classify_intent_or_none` la interceptaba ANTES de llegar a
+    revisarla — "necesito" (dentro de "ya no NECESITO más") activa
+    `_tiene_senal_de_intencion` (recado 056), y el orden anterior
+    probaba `classify_intent_or_none` PRIMERO, así que una despedida
+    inequívoca terminaba ofreciendo fechas de una reserva nueva que
+    nadie pidió. Corregido invirtiendo la prioridad: despedida/salir se
+    revisan ANTES que `classify_intent_or_none` (`_interpretar_opcion_menu`
+    sigue yendo primero de todos — un ordinal/palabra exacta del menú
+    nunca es ambiguo). Mismo principio pedido explícitamente: "la
+    despedida SIEMPRE gana cuando el mensaje es inequívocamente un
+    cierre"."""
+    intent = _interpretar_opcion_menu(text)
+    if intent is None and (_es_despedida(text.lower().strip()) or _es_solicitud_de_salir(text)):
+        intent = RequestIntent.SALIR
     if intent is None:
-        if _es_despedida(text.lower().strip()):
-            intent = RequestIntent.SALIR
-        else:
-            resultado_llm = _clasificar_solicitud_nueva_via_llm(text, gateway.selection_proposer)
-            if resultado_llm is None:
-                return None
-            if resultado_llm == "emocional":
-                return _respuesta_expresion_emocional_menu()
-            intent = resultado_llm
-    return _resolver_por_intent(gateway, patient_reference, channel, message_id, text, intent)
+        intent = classify_intent_or_none(text)
+    if intent is None:
+        resultado_llm = _clasificar_solicitud_nueva_via_llm(text, gateway.selection_proposer)
+        if resultado_llm is None:
+            return None
+        if resultado_llm == "emocional":
+            return _respuesta_expresion_emocional_menu(), False
+        intent = resultado_llm
+    respuesta = _resolver_por_intent(gateway, patient_reference, channel, message_id, text, intent)
+    return respuesta, intent == RequestIntent.SALIR
 
 
 # Recado 064 — categorías reales para la clasificación asistida por LLM
@@ -1157,7 +1249,13 @@ def _cerrar_si_definitivo(gateway: HealthGateway, patient_reference: str, contex
         # acaba de cerrar, para que un regreso poco después reciba un
         # saludo corto en vez de la presentación institucional completa.
         nombre_conocido = (context.activity.patient_contact or {}).get("nombre")
-        gateway._cierre_reciente[patient_reference] = (datetime.now(timezone.utc), nombre_conocido)
+        # Recado 067 — DECLINED (nunca CONFIRMED/RESCHEDULED) activa el
+        # enfriamiento de 2 minutos: el paciente se fue sin completar
+        # nada (una despedida real, o un "no" explícito) — distinto de
+        # haber confirmado una reserva real, donde seguir conversando de
+        # inmediato es normal y esperado.
+        es_despedida = context.activity.management_status == ManagementStatus.DECLINED
+        gateway._cierre_reciente[patient_reference] = (datetime.now(timezone.utc), nombre_conocido, es_despedida)
         return True
     return False
 
@@ -1446,18 +1544,18 @@ def _elegir_opcion_ordinal(texto: str, opciones: list) -> Optional[str]:
     propia máquina de etapas); aquí no hay ninguna lógica de dominio,
     solo interpretar un ordinal de una lista ya ofrecida.
 
-    Recado 056 — mismo bug real de `HealthBrain._elegir_opcion` (recado
-    053, caso Giselle Tornay): un `in` simple sobre "1"/"2"/"3" hacía que
-    CUALQUIER texto que contuviera esos dígitos en cualquier posición
-    (una hora tipo "7:30", por ejemplo) se malinterpretara como ordinal.
-    Encontrado al revisar este archivo buscando el mismo patrón de bug
-    en otros lugares — esta copia local nunca se había corregido.
-    `\\b...\\b` exige que el dígito sea un token propio."""
-    texto = texto.lower()
-    mapa = {"1": 0, "primera": 0, "2": 1, "segunda": 1, "3": 2, "tercera": 2}
-    for clave, indice in mapa.items():
-        if re.search(rf"\b{re.escape(clave)}\b", texto) and indice < len(opciones):
-            return opciones[indice]
+    Recado 067 — antes tenía su propia copia local del mismo matching
+    (`\\b...\\b`, recado 056) — ahora delega en `_indice_ordinal_seguro`
+    (brain.py), la MISMA función que `HealthBrain._elegir_opcion` usa
+    para fecha/horario: un límite de palabra por sí solo no bastaba
+    para excluir un dígito suelto dentro de una oración larga y ajena a
+    la selección (ver docstring de esa función) — corregir esto dos
+    veces, por separado, habría sido exactamente el tipo de deuda que
+    ya causó los recados 062/063/064 (un detector que solo vive en un
+    camino de código)."""
+    indice = _indice_ordinal_seguro(texto.lower())
+    if indice is not None and indice < len(opciones):
+        return opciones[indice]
     return None
 
 
@@ -1564,7 +1662,6 @@ def _enviar_codigo_y_pausar(
 # 062 para la recomendación evaluada de conectar estos wizards al
 # mecanismo de interpretación asistida por LLM del recado 052
 # (`core/selection.py`) en vez de seguir agregando reglas una por una.
-_SALIR_WIZARD = ("salir", "cancelar esto", "exit", "ya no quiero", "olvidalo", "detente")
 _REENVIAR_CODIGO = (
     "reenviar", "reenviame", "reenviarme", "reenviarlo", "no me llego", "no llego", "nunca llego",
     "mandame otro", "manda otro", "otro codigo", "envia de nuevo", "enviame de nuevo",
@@ -1586,7 +1683,7 @@ def _clasificar_interrupcion_wizard(texto: str) -> Optional[str]:
     salida es una acción irreversible sin confirmación adicional — más
     vale un falso negativo aquí, corregible con un segundo mensaje, que
     un falso positivo que aborte un código/documento real en curso)."""
-    if any(frase in texto.lower() for frase in _SALIR_WIZARD):
+    if _es_solicitud_de_salir(texto):
         return "salir"
     if _contains_any_fuzzy(texto, _REENVIAR_CODIGO):
         return "reenviar"

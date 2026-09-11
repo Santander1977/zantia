@@ -256,6 +256,35 @@ _DESPEDIDA = (
 )
 _RE_PUNTUACION_DESPEDIDA = re.compile(r"[¡!¿?.,;:]")
 
+# Recado 067 — hallazgo real: "salir"/"exit" (recados 062/063, MISMA
+# lista antes vivía SOLO en gateway.py, usada por los wizards
+# independientes del Brain) NUNCA se reconocían dentro de una
+# conversación YA ABIERTA (`_detectar_interrupcion_de_contexto`,
+# cualquier etapa: esperando_servicio, esperando_fecha, esperando_horario,
+# esperando_decision, esperando_seleccion_reprogramacion) — un paciente
+# que escribiera "salir"/"exit" ahí caía al matching específico de esa
+# etapa (ej. `_interpretar_servicio` intentando matchear "salir" como
+# nombre de servicio), el mismo callejón sin salida ya corregido en los
+# wizards. Causa raíz: `_DESPEDIDA` (arriba) EXCLUYE a propósito
+# "salir"/"terminar" sueltos (recado 059 — "terminar" tiene falsos
+# positivos reales, "quiero TERMINAR de agendar" significa seguir, no
+# cerrar) — la única vía que SÍ reconocía "salir"/"exit" era
+# `_MENU_OPCIONES` (gateway.py), inalcanzable una vez que hay una
+# conversación abierta. Movida acá (antes solo en gateway.py) para que
+# `_detectar_interrupcion_de_contexto` la reconozca también — misma
+# lista, mismo criterio de coincidencia EXACTA (nunca fuzzy, mismo
+# motivo ya documentado en gateway.py: una salida es irreversible sin
+# confirmación adicional). Riesgo aceptado y documentado, no nuevo: como
+# substring, "salir" podría matchear una frase no relacionada ("necesito
+# salir temprano del trabajo, ¿tienen citas después de las 5?") — mismo
+# trade-off que los wizards ya aceptaban; se ajusta con evidencia real
+# si aparece un caso así, no antes.
+_SOLICITUD_DE_SALIR = ("salir", "cancelar esto", "exit", "ya no quiero", "olvidalo", "detente")
+
+
+def _es_solicitud_de_salir(texto: str) -> bool:
+    return any(frase in texto.lower() for frase in _SOLICITUD_DE_SALIR)
+
 
 def _es_despedida(texto: str) -> bool:
     """`_DESPEDIDA` compara sobre texto SIN puntuación — quita comas y
@@ -275,8 +304,18 @@ def _es_despedida(texto: str) -> bool:
 # copiarlo literal en dos archivos (mismo criterio de import ya
 # establecido para `_lista_numerada`/`_formatear_fecha_humana`).
 def _texto_despedida(nombre: Optional[str]) -> str:
+    """Recado 067 — un solo mensaje limpio, cierre real (nunca la
+    pregunta "¿puedo ayudarte en algo más?" antepuesta — ver el bug de
+    duplicación corregido en `gateway.py:handle_inbound_message`,
+    `es_cierre`). Menciona el enfriamiento real de 2 minutos que
+    `gateway.py:_cerrar_si_definitivo`/`_VENTANA_ENFRIAMIENTO` aplican a
+    partir de este mismo mensaje — texto y mecanismo siempre
+    sincronizados (nunca una promesa sin mecanismo detrás)."""
     despedida = f"¡Con gusto, {nombre}!" if nombre else "¡Con gusto!"
-    return f"{despedida} Que tengas buen día. Aquí estaré si necesitas algo más."
+    return (
+        f"{despedida} Que tengas buen día. Aquí estaré si necesitas algo más. "
+        "En 2 minutos podremos atender otra solicitud si la necesitas."
+    )
 # Recado 053, Parte 3 — pedido explícito del usuario: un mensaje
 # emocional/personal real ("me deprime ir al médico", "estoy
 # deprimido/a", "esto me tiene angustiada") NO es lo mismo que un typo o
@@ -492,6 +531,50 @@ def _formatear_fecha_humana(fecha_iso: str) -> str:
 # Mismos dos niveles para horario, con "hora:minuto"/"hora am/pm" como
 # nivel 1 y "hora sola" ("7") como nivel 2.
 _RE_PALABRA = r"\b{}\b"
+
+# Recado 067 — hallazgo real y GRAVE: un dígito suelto ("2") dentro de
+# una oración larga y completamente AJENA a elegir una opción (ej. "en
+# 2 minutos", un comentario/feedback del paciente sobre el propio texto
+# de ZANTIA) se interpretaba como si el paciente hubiera elegido la 2da
+# opción — reproducido con evidencia real: una RESERVA REAL se creó a
+# partir de puro feedback ("Aquí en este texto debe decir que finalizó
+# la solicitud y que en 2 minutos puede iniciar otro trámite"), sin que
+# el paciente pidiera nada. Mismo patrón de fondo que los recados
+# 053/056 (dígito como substring de una hora tipo "7:30"), pero ahí el
+# fix (`\b...\b`, límite de palabra) fue insuficiente para ESTE caso: el
+# dígito SÍ es un token propio, solo que perdido dentro de una oración
+# larga y sin ninguna relación con la pregunta de selección.
+#
+# Límite nuevo: el mensaje completo debe tener, como mucho,
+# `_MAX_PALABRAS_ORDINAL_SUELTO` palabras — una respuesta real a "¿cuál
+# prefieres?" es corta por naturaleza ("2", "la segunda", "prefiero la
+# 2 por favor", "la del medio" — recado 052, 4 palabras); una oración
+# de 15 palabras sobre otra cosa nunca es una selección genuina, sin
+# importar qué dígitos contenga de pura casualidad. Umbral generoso
+# (8 palabras) — cubre cómodamente respuestas reales ya vistas en este
+# proyecto sin dejar pasar una oración claramente no relacionada.
+#
+# Compartida entre `HealthBrain._elegir_opcion` (fecha/horario) y
+# `gateway.py:_elegir_opcion_ordinal` (selección de slot al
+# reprogramar) — MISMA función, nunca una copia paralela; antes cada
+# una tenía su propia implementación del mismo matching (documentado
+# como deliberado en su momento, pero eso hizo que este hallazgo
+# tuviera que corregirse dos veces si no se centralizaba ahora).
+_MAX_PALABRAS_ORDINAL_SUELTO = 8
+
+
+def _indice_ordinal_seguro(texto: str) -> Optional[int]:
+    """Devuelve el índice (0/1/2) de la opción "1"/"primera", "2"/
+    "segunda", o "3"/"tercera" reconocida como ordinal SUELTO en
+    `texto` — `None` si no hay ninguna coincidencia, o si el mensaje es
+    demasiado largo para ser una respuesta directa a una pregunta de
+    selección (ver docstring del módulo arriba)."""
+    if len(texto.split()) > _MAX_PALABRAS_ORDINAL_SUELTO:
+        return None
+    for clave, indice in (("1", 0), ("primera", 0), ("2", 1), ("segunda", 1), ("3", 2), ("tercera", 2)):
+        if re.search(_RE_PALABRA.format(re.escape(clave)), texto):
+            return indice
+    return None
 
 
 def _dia_semana_normalizado(fecha_iso: str) -> Optional[str]:
@@ -799,6 +882,28 @@ class HealthBrain:
             return self._interpretar_confirmacion_olvido(texto, datos)
         if _contains_any(texto, _OLVIDAR):
             return self._iniciar_olvido(datos, etapa)
+
+        # Recado 067 — auditoría completa de "salir"/despedida: a
+        # diferencia de las otras 5 categorías de interrupción de abajo
+        # (que si se excluyen a propósito en
+        # `_ETAPAS_SIN_INTERRUPCION_DE_CONTEXTO`, para no reinterrumpir
+        # un wizard de interrupción ya en curso), la intención de SALIR
+        # debe reconocerse SIEMPRE, en CUALQUIER etapa sin excepción —
+        # incluidas `esperando_documento_beneficiario`/
+        # `esperando_confirmacion_beneficiario`, confirmado con evidencia
+        # real que quedaban sin ninguna salida (ni siquiera un
+        # escalamiento tras intentos fallidos, a diferencia del wizard
+        # de identidad de gateway.py) si el documento nunca calzaba
+        # contra `buscar_paciente`. Mismo criterio que `_OLVIDAR` arriba
+        # (prioridad máxima, antes que cualquier otra cosa).
+        if _es_despedida(texto) or _es_solicitud_de_salir(texto):
+            nuevos = {**datos, "etapa": "finalizada", "decision": "DECLINED"}
+            nombre = (self._activity.patient_contact or {}).get("nombre")
+            return BrainOutput(
+                senales_detectadas=["despedida_reconocida"],
+                respuesta_propuesta=_texto_despedida(nombre),
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": nuevos},
+            )
 
         # Interrupciones de CONTEXTO (recado 047, corrige un hallazgo
         # real de producción con HEALTH_BRAIN_TYPE=llm activo, recado
@@ -1120,7 +1225,12 @@ class HealthBrain:
         # verdad) — nunca un mecanismo nuevo y paralelo sin sincronizar
         # (lección explícita del recado 057: código duplicado sin
         # sincronizar es la fuente real de bugs de esta serie).
-        if _es_despedida(texto):
+        # Recado 067 — `_es_solicitud_de_salir` (arriba) agregada a la
+        # MISMA condición: "salir"/"exit" ahora cierran la conversación
+        # exactamente igual que una despedida en lenguaje natural —
+        # mismo texto, mismo cierre real (DECLINED), ninguna rama nueva
+        # y paralela.
+        if _es_despedida(texto) or _es_solicitud_de_salir(texto):
             nuevos = {**datos, "etapa": "finalizada", "decision": "DECLINED"}
             nombre = (self._activity.patient_contact or {}).get("nombre")
             return BrainOutput(
@@ -1738,11 +1848,16 @@ class HealthBrain:
         (`gateway.py:_interpretar_opcion_menu`), nunca corregido aquí.
         `\\b...\\b` exige que el dígito sea un TOKEN propio (no parte de
         "7:30", "13", "08:00") — sigue reconociendo "3" sola, "opción 3",
-        "la 3", exactamente igual que antes para esos casos."""
-        mapa_ordinal = {"1": 0, "primera": 0, "2": 1, "segunda": 1, "3": 2, "tercera": 2}
-        for clave, indice in mapa_ordinal.items():
-            if re.search(_RE_PALABRA.format(re.escape(clave)), texto) and indice < len(opciones):
-                return opciones[indice]
+        "la 3", exactamente igual que antes para esos casos.
+
+        Recado 067 — delega en `_indice_ordinal_seguro` (módulo, ver su
+        docstring): el límite de palabra por sí solo no bastaba —
+        "en 2 minutos" dentro de una oración larga y ajena a la
+        selección seguía matcheando "2" como ordinal, causando una
+        RESERVA REAL creada a partir de puro feedback del paciente."""
+        indice = _indice_ordinal_seguro(texto)
+        if indice is not None and indice < len(opciones):
+            return opciones[indice]
         return None
 
     # ------------------------------------------------------------------

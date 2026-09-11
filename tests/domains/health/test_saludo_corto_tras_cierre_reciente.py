@@ -56,8 +56,8 @@ def test_regreso_pasado_el_umbral_recibe_saludo_completo_de_nuevo():
     # Simula que ya pasó más del umbral (31 minutos) — retrocede el
     # timestamp real guardado en el cierre, sin tocar ningún reloj global.
     patient_ref = "PAC-CORTO-2"
-    momento, nombre = gateway._cierre_reciente[patient_ref]
-    gateway._cierre_reciente[patient_ref] = (momento - timedelta(minutes=31), nombre)
+    momento, nombre, es_despedida = gateway._cierre_reciente[patient_ref]
+    gateway._cierre_reciente[patient_ref] = (momento - timedelta(minutes=31), nombre, es_despedida)
 
     r4 = handle_inbound_message(gateway, patient_ref, "demo", "m4", "hola")
     assert "hospital regional" in r4.lower(), f"pasado el umbral, debía ver el saludo completo: {r4!r}"
