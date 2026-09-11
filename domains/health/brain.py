@@ -36,6 +36,7 @@ from memory.conversation_memory import Turn
 from state.models import ConversationState
 
 from .appointment_service import AppointmentService
+from .institutional_info import INFORMACION_HOSPITAL, InformacionInstitucional
 from .models import respuesta_pregunta_sobre_correo
 
 # Normalización de tildes — NUNCA toca "ñ" ("año"/"ano" son palabras
@@ -108,6 +109,51 @@ _SALUDOS = ("hola", "buenas", "buenos dias", "buenas tardes", "buenas noches", "
 _HUMANO = ("hablar con alguien", "persona real", "un humano", "un asesor", "quiero hablar con")
 _NO_PUEDE_AHORA = ("no puedo ahora", "ahora no puedo", "en otro momento", "llámame después", "más tarde no")
 _PIDE_INFO = ("qué es", "más información", "cuéntame más", "por qué me contactan", "explícame", "de qué se trata")
+# Recado 064 (segunda parte) — dos preguntas reales sobre el HOSPITAL
+# en sí (no sobre el trámite de la cita) que ninguna categoría existente
+# cubría: "¿dónde queda?" (ubicación) y "¿son buenos?" (calidad de
+# atención) — ambas caían, sin esto, a la interpretación de la etapa
+# activa (ej. `_interpretar_fecha` tratándolas como un intento fallido
+# de elegir fecha), perdiendo la pregunta real del paciente.
+#
+# Recado 066 — ampliada con preguntas directas de contacto ("cuál es el
+# teléfono", "tienen correo"): ahora que SÍ hay teléfono/correo reales
+# (`institutional_info.py`), es la misma categoría de "información de
+# contacto/ubicación del hospital" — una pregunta directa por el
+# teléfono no merece una lista de palabras clave nueva y paralela.
+_PREGUNTA_UBICACION_HOSPITAL = (
+    "donde queda", "donde esta ubicado", "donde esta el hospital", "cual es la direccion",
+    "que direccion", "como llego", "donde es el hospital", "ubicacion del hospital",
+    "cual es el telefono", "cual es su telefono", "tienen telefono", "numero de telefono",
+    "tienen correo", "cual es el correo", "cual es su correo", "como los contacto",
+    "como me comunico", "como puedo comunicarme",
+)
+_PREGUNTA_CALIDAD_ATENCION = (
+    "son buenos", "es bueno el hospital", "buena atencion", "que tal la atencion",
+    "vale la pena", "es recomendable", "recomiendan el hospital", "atienden bien",
+)
+
+
+def _texto_informacion_hospital(info: InformacionInstitucional) -> str:
+    """Recado 066 — arma el texto de contacto/ubicación institucional
+    ÚNICAMENTE a partir de `INFORMACION_HOSPITAL` (`institutional_info.py`,
+    fuente única de verdad) — ningún valor se escribe a mano acá.
+    Extensible sin duplicar lógica (requisito explícito del pedido): si
+    `direccion` todavía no está confirmada (`None`), el texto lo dice
+    honestamente en vez de inventarla; en cuanto se confirma (como ya
+    ocurrió en este mismo pedido), esta MISMA función la incluye
+    automáticamente — ningún llamador necesita cambiar."""
+    if info.direccion:
+        return (
+            f"Estamos ubicados en {info.direccion}. Si necesitas más detalles, también puedes "
+            f"llamarnos al {info.telefono_citas} o escribirnos a {info.correo_citas}."
+        )
+    return (
+        f"No tengo una dirección exacta registrada en este canal, pero puedes llamarnos al "
+        f"{info.telefono_citas} o escribirnos a {info.correo_citas} para confirmarla."
+    )
+
+
 _INFO_NO_AUTORIZADA = ("mi diagnóstico", "diagnostico", "resultado de mis examenes", "resultado de mis exámenes", "qué enfermedad tengo", "qué tengo")
 _REPROGRAMAR = ("no puedo asistir", "reprogramar", "cambiar la cita", "otro día", "otra fecha")
 _CANCELAR = ("cancelar la cita", "ya no quiero la cita", "cancela mi cita")
@@ -911,6 +957,46 @@ class HealthBrain:
                 proxima_accion_propuesta="preguntar_intencion",
                 # `etapa` no cambia — mismo criterio que INFO_NO_AUTORIZADA
                 # arriba.
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+            )
+
+        # Recado 064 (segunda parte) — hallazgo real: dos preguntas sobre
+        # el hospital en sí, no sobre el trámite, que ninguna categoría
+        # de arriba reconocía. Mismo patrón que `_responder_expresion_emocional`
+        # (recado 053): `etapa`/`datos` NUNCA cambian, y la respuesta
+        # incluye el MISMO recordatorio breve de `_RECORDATORIO_BREVE_POR_ETAPA`
+        # para volver naturalmente a lo que se le estaba preguntando —
+        # reutilizado tal cual, nunca un texto de recordatorio nuevo y
+        # paralelo.
+        if _contains_any_sin_tildes(texto, _PREGUNTA_UBICACION_HOSPITAL):
+            # Recado 066 — el usuario confirmó teléfono/correo/dirección
+            # reales (`institutional_info.py`, única fuente de verdad).
+            # `_texto_informacion_hospital` arma el texto SIEMPRE a partir
+            # de esos datos, nunca de un valor escrito a mano acá —
+            # extensible sin duplicar lógica si algún campo cambia.
+            recordatorio = _RECORDATORIO_BREVE_POR_ETAPA.get(etapa_actual, "¿en qué te puedo ayudar?")
+            return BrainOutput(
+                senales_detectadas=["pregunta_ubicacion_hospital"],
+                respuesta_propuesta=f"{_texto_informacion_hospital(INFORMACION_HOSPITAL)} {recordatorio}",
+                proxima_accion_propuesta="preguntar_intencion",
+                propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
+            )
+
+        if _contains_any_sin_tildes(texto, _PREGUNTA_CALIDAD_ATENCION):
+            # Nunca una opinión personal del sistema (mismo principio de
+            # `OpinionPersonalGuardrail`, aunque esa regla vive en Core y
+            # bloquea temas AJENOS al propósito — acá el tema SÍ es
+            # relevante, pero ZANTIA tampoco inventa una calificación que
+            # no tiene) — honestidad cálida, nunca evasiva ni robótica.
+            recordatorio = _RECORDATORIO_BREVE_POR_ETAPA.get(etapa_actual, "¿en qué te puedo ayudar?")
+            return BrainOutput(
+                senales_detectadas=["pregunta_calidad_atencion"],
+                respuesta_propuesta=(
+                    "Es una pregunta válida, pero no tengo información objetiva para darte una opinión "
+                    "sobre eso — lo que sí puedo hacer con gusto es ayudarte a agendar tu atención cuando "
+                    f"quieras. {recordatorio}"
+                ),
+                proxima_accion_propuesta="preguntar_intencion",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
             )
 

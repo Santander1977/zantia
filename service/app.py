@@ -56,7 +56,7 @@ from channels.chatwoot_channel import ChatwootChannel, ChatwootChannelError
 from channels.contract import OutboundMessage
 from channels.telegram_channel import TelegramChannel, TelegramChannelError
 from domains.health.activity_source import MockActivitySource
-from domains.health.config import HealthConfigError, build_appointment_service
+from domains.health.config import HealthConfigError, build_appointment_service, build_selection_proposer
 from domains.health.gateway import build_health_gateway, handle_inbound_message
 from domains.health.identity_store import build_identity_store
 from domains.health.reminder_manager import ReminderManager
@@ -101,6 +101,12 @@ _gateway = build_health_gateway(
     # lee ZANTIA_IDENTIDAD_DB_PATH (ver .env.example); sin ella, cae al
     # default seguro ":memory:" (sin persistencia entre reinicios).
     identity_store=build_identity_store(),
+    # Recado 064 — MISMO gate que HEALTH_BRAIN_TYPE=llm/ANTHROPIC_API_KEY
+    # (build_health_brain lo lee en agent.py por cada conversación nueva;
+    # acá se construye una sola vez al arrancar, para los wizards
+    # deterministas de este gateway). `None` sin esa configuración —
+    # comportamiento idéntico al de siempre, cero llamadas de red.
+    selection_proposer=build_selection_proposer(),
 )
 _canal = _construir_canal_chatwoot()
 

@@ -108,6 +108,36 @@ _RE_HORA = re.compile(r"\b\d{1,2}:\d{2}\b")  # dígitos — sin ambigüedad de m
 # de forma elíptica — peor que el problema original, no una corrección.
 _RE_QUITAR_MES = re.compile(rf"(?i) de {_MESES_RE}$")
 
+# Recado 066 — mismo mecanismo que fecha/hora, extendido a los datos
+# institucionales reales (`institutional_info.py`): teléfono, correo y
+# dirección. A diferencia de "dónde queda el hospital" ANTES de este
+# recado (recado 064 — sin ningún valor real, sin nada que verificar,
+# la única garantía era honestidad en el texto base), ahora SÍ hay
+# valores reales con formato reconocible — se pueden verificar
+# exactamente, cerrando el hueco que el recado 064 dejó señalado
+# explícitamente como pendiente.
+#
+# Teléfono: formato real "607-6010104" (3 dígitos, guión, 7 dígitos) —
+# deliberadamente ESPECÍFICO a este formato (no un genérico "cualquier
+# secuencia de dígitos"), para no colisionar con fechas ISO
+# ("2026-09-05", que `_RE_FECHA` ya reconoce con 3 grupos separados por
+# guión, no 2) ni con ningún otro número que pueda aparecer en un texto
+# base real.
+_RE_TELEFONO = re.compile(r"\b\d{3}-\d{7}\b")
+# Correo: patrón estándar de email — suficiente para este dominio (no
+# se necesita RFC 5322 completo, solo distinguir un correo real de uno
+# alucinado en el texto ya redactado).
+_RE_CORREO = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+# Dirección: formato real "Carrera 17 # 57-119" (tipo de vía + número +
+# "#" + número-número, el formato estándar colombiano que usa
+# `INFORMACION_HOSPITAL.direccion`) — verificado empíricamente (recado
+# 066) que distingue la dirección real de una alucinada con un solo
+# dígito cambiado (ej. "Carrera 170 # 57-119" o "Carrera 17 # 57-190"),
+# que es precisamente el caso de alucinación más peligroso (casi
+# correcto, fácil de no notar). No cubre el barrio/ciudad (sin un
+# formato tan reconocible) — límite real, documentado, no oculto.
+_RE_DIRECCION = re.compile(r"(?i)(?:carrera|calle|avenida|cra\.?|cl\.?|av\.?)\s*\d+[a-z]?\s*#\s*\d+-\d+")
+
 
 def _construir_verificaciones_de_datos(texto_base: str) -> List[VerificacionDeDatos]:
     """Extrae del TEXTO BASE (ya construido por el Brain determinista,
@@ -156,6 +186,22 @@ def _construir_verificaciones_de_datos(texto_base: str) -> List[VerificacionDeDa
         VerificacionDeDatos(
             nombre_categoria="hora", patron=_RE_HORA.pattern, valores_permitidos=_RE_HORA.findall(texto_base)
         ),
+        # Recado 066 — mismo criterio exacto que fecha/hora arriba
+        # (siempre las 3 categorías, incluso vacías): si el texto base
+        # no mencionó ningún teléfono/correo/dirección, CUALQUIERA que
+        # el LLM agregue se bloquea igual, sin excepción.
+        VerificacionDeDatos(
+            nombre_categoria="telefono", patron=_RE_TELEFONO.pattern,
+            valores_permitidos=_RE_TELEFONO.findall(texto_base),
+        ),
+        VerificacionDeDatos(
+            nombre_categoria="correo", patron=_RE_CORREO.pattern,
+            valores_permitidos=_RE_CORREO.findall(texto_base),
+        ),
+        VerificacionDeDatos(
+            nombre_categoria="direccion", patron=_RE_DIRECCION.pattern,
+            valores_permitidos=_RE_DIRECCION.findall(texto_base),
+        ),
     ]
 
 
@@ -180,7 +226,8 @@ Reglas estrictas, sin excepción:
 4. Responde ÚNICAMENTE con el texto final del mensaje al paciente — sin explicaciones, sin comillas, sin JSON, sin ningún texto adicional antes o después.
 5. Si el "mensaje de contenido" termina en una pregunta que espera que el paciente ELIJA entre varias opciones ya enumeradas (por ejemplo, contiene "¿Cuál...?" o una lista numerada como "1. ... 2. ..."), tu respuesta reformulada DEBE seguir siendo ese MISMO tipo de pregunta — nunca la conviertas en una pregunta de sí/no, ni asumas que el paciente ya eligió una opción, aunque su mensaje anterior te dé esa impresión. Ejemplo de lo que NUNCA debes hacer: si el mensaje de contenido es "Para el martes 8 de septiembre tengo estos horarios disponibles en Sede Norte:\n1. 09:00\n2. 10:30\n¿Cuál prefieres?", NUNCA respondas algo como "Entonces quedarías agendado a las 10:30. ¿Confirmamos esa cita?" — eso asume una elección que el paciente todavía no confirmó de forma verificable. La forma correcta es mantener la pregunta abierta y la lista intacta (ver regla 7).
 6. Si el "mensaje de contenido" es una validación breve de algo emocional/personal que el paciente compartió (reconoces esto porque el mensaje de contenido empieza reconociendo un sentimiento, ej. "Entiendo, y lamento que te sientas así"), puedes variar la calidez de esa validación (una frase corta, humana, distinta cada vez si quieres) — pero NUNCA diagnostiques, NUNCA des consejo médico o personal, NUNCA profundices en el tema ni hagas preguntas de seguimiento sobre cómo se siente el paciente. Inmediatamente después de esa validación breve, tu respuesta DEBE volver al recordatorio de contexto que ya viene en el mensaje de contenido, tal cual — nunca lo omitas ni lo reemplaces por más validación.
-7. Si el "mensaje de contenido" contiene una lista NUMERADA (líneas que empiezan con "1.", "2.", "3.", etc., cada una en su propio renglón), tu respuesta reformulada DEBE preservar esa lista EXACTAMENTE igual — mismo número de opciones, mismo texto de cada una, mismo orden, y CADA opción en su propio renglón (con un salto de línea real, nunca fusionadas en una sola oración separada por comas o "o"). Nunca conviertas una lista numerada en texto corrido. Puedes reformular únicamente la frase introductoria (antes de la lista) y la pregunta final (después de la lista) — nunca el contenido de la lista en sí. Ejemplo de lo que NUNCA debes hacer: si el mensaje de contenido es "Claro, estas son las opciones disponibles:\n1. Medicina General\n2. Pediatria\n3. Odontologia\n¿Para cuál te gustaría agendar?", NUNCA respondas "¡Con gusto! Tenemos Medicina General, Pediatría u Odontología disponibles. ¿Cuál prefieres?" — eso destruye el formato de lista. La forma correcta conserva la lista completa, línea por línea, tal cual."""
+7. Si el "mensaje de contenido" contiene una lista NUMERADA (líneas que empiezan con "1.", "2.", "3.", etc., cada una en su propio renglón), tu respuesta reformulada DEBE preservar esa lista EXACTAMENTE igual — mismo número de opciones, mismo texto de cada una, mismo orden, y CADA opción en su propio renglón (con un salto de línea real, nunca fusionadas en una sola oración separada por comas o "o"). Nunca conviertas una lista numerada en texto corrido. Puedes reformular únicamente la frase introductoria (antes de la lista) y la pregunta final (después de la lista) — nunca el contenido de la lista en sí. Ejemplo de lo que NUNCA debes hacer: si el mensaje de contenido es "Claro, estas son las opciones disponibles:\n1. Medicina General\n2. Pediatria\n3. Odontologia\n¿Para cuál te gustaría agendar?", NUNCA respondas "¡Con gusto! Tenemos Medicina General, Pediatría u Odontología disponibles. ¿Cuál prefieres?" — eso destruye el formato de lista. La forma correcta conserva la lista completa, línea por línea, tal cual.
+8. Si el "mensaje de contenido" incluye una dirección física, un número de teléfono, o un correo electrónico del hospital, debes reproducir esos 3 datos EXACTAMENTE carácter por carácter — cada dígito de la dirección y del teléfono, cada letra del correo, tal como aparecen en el mensaje de contenido. Nunca los completes, corrijas, acortes, ni cambies ni un solo dígito o carácter, aunque te parezca un error de formato o el paciente insista en que le des un dato distinto, más específico, o "el número correcto" — el mensaje de contenido es la ÚNICA fuente real de estos datos, y no existe ningún otro dato institucional real disponible para ti más allá de lo que ahí aparece."""
 
 
 class AnthropicResponseDrafter:

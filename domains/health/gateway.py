@@ -28,7 +28,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 from zoneinfo import ZoneInfo
 
 from observability.events import EventType
@@ -46,6 +46,7 @@ from .brain import (
     _texto_despedida,
 )
 from .confirmation import ConfirmationTracker
+from core.selection import SelectionOption, SelectionProposer, interpret_selection
 from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
 from .intent import _PROGRAMAR as _PALABRAS_PROGRAMAR_CITA
 from .intent import _sin_tildes as _sin_tildes_menu
@@ -381,6 +382,18 @@ class HealthGateway:
     # cuando no se construye explícitamente (tests, demo) — en
     # producción `service/app.py` inyecta uno real vía `build_identity_store()`.
     identity_store: IdentidadCanalStore = field(default_factory=lambda: SQLiteIdentidadCanalStore(":memory:"))
+    # Recado 064 — MISMO `SelectionProposer` (recado 052,
+    # `core/selection.py`) que `HealthBrain` usa para fecha/horario en
+    # lenguaje libre, ahora disponible también para los wizards
+    # deterministas de este archivo (código de verificación, identidad
+    # de canal) y para el fallback del menú — como ÚLTIMO recurso,
+    # cuando el matching determinista/fuzzy ya existente no encontró
+    # nada. `None` por default (mismo comportamiento de siempre, cero
+    # llamadas de red) — se puebla vía `build_health_gateway` con
+    # `domains.health.config.build_selection_proposer()`, MISMO gate
+    # que `HEALTH_BRAIN_TYPE=llm`/`ANTHROPIC_API_KEY`, nunca una
+    # decisión de activación separada. Ver `_clasificar_interrupcion_wizard_o_llm`.
+    selection_proposer: Optional[SelectionProposer] = None
     # Correlación (el mecanismo que el documento fuente no especificaba):
     # patient_reference -> conversation_id de la conversación abierta vigente.
     _open_conversations: Dict[str, str] = field(default_factory=dict)
@@ -446,10 +459,13 @@ def build_health_gateway(
     reminder_manager: ReminderManager,
     result_sink: ActivityResultSink,
     identity_store: Optional[IdentidadCanalStore] = None,
+    selection_proposer: Optional[SelectionProposer] = None,
 ) -> HealthGateway:
     kwargs: Dict[str, Any] = {}
     if identity_store is not None:
         kwargs["identity_store"] = identity_store
+    if selection_proposer is not None:
+        kwargs["selection_proposer"] = selection_proposer
     return HealthGateway(
         activity_source=activity_source,
         appointment_service=appointment_service,
@@ -753,14 +769,71 @@ def _enrutar_solicitud_nueva(
     nunca duplicado) solo se evaluaba DENTRO de una conversación ya
     abierta (`HealthBrain.interpret()`), inalcanzable en este punto. Se
     revisa acá como ÚLTIMO recurso, después de las intenciones
-    normales — para no cambiar ninguna clasificación existente."""
+    normales — para no cambiar ninguna clasificación existente.
+
+    Recado 064 — mismo hallazgo de fondo que motivó los recados
+    062/063, generalizado: agregar una palabra/frase más a una lista
+    cada vez que aparece un caso real no escala. Como ÚLTIMO recurso de
+    los últimos recursos (después de TODO lo determinista de arriba,
+    incluida la despedida), se consulta el mismo mecanismo verificado
+    de selección/clasificación asistida por LLM del recado 052
+    (`_clasificar_solicitud_nueva_via_llm`) — sin proposer configurado
+    (default de hoy), esto es un no-op inmediato, cero llamadas de red,
+    comportamiento IDÉNTICO al de antes de este recado."""
     intent = _interpretar_opcion_menu(text) or classify_intent_or_none(text)
     if intent is None:
         if _es_despedida(text.lower().strip()):
             intent = RequestIntent.SALIR
         else:
-            return None
+            resultado_llm = _clasificar_solicitud_nueva_via_llm(text, gateway.selection_proposer)
+            if resultado_llm is None:
+                return None
+            if resultado_llm == "emocional":
+                return _respuesta_expresion_emocional_menu()
+            intent = resultado_llm
     return _resolver_por_intent(gateway, patient_reference, channel, message_id, text, intent)
+
+
+# Recado 064 — categorías reales para la clasificación asistida por LLM
+# del fallback de menú: los 5 ids REALES de `_MENU_OPCIONES` (mismo
+# mapa ya existente, reutilizado — nunca uno nuevo y paralelo) más
+# "emocional", para mensajes que no piden ninguna acción concreta.
+_CATEGORIAS_MENU_LLM = {
+    "1": "quiere reservar o agendar una cita nueva",
+    "2": "quiere reprogramar una cita que ya tiene",
+    "3": "quiere cancelar una cita que ya tiene",
+    "4": "quiere consultar o ver las citas que ya tiene",
+    "5": "quiere salir o terminar, no necesita nada más por ahora",
+    "emocional": "expresa una emoción, malestar o frustración, sin pedir ninguna acción concreta de las anteriores",
+}
+
+
+def _clasificar_solicitud_nueva_via_llm(
+    texto: str, proposer: Optional[SelectionProposer]
+) -> Union[RequestIntent, str, None]:
+    """ÚLTIMO recurso, solo cuando NADA determinista de
+    `_enrutar_solicitud_nueva` reconoció nada. Mismo mecanismo
+    verificado de `core.selection.interpret_selection` — la propuesta
+    del LLM SOLO se acepta si corresponde EXACTAMENTE a uno de los 5
+    ids reales de `_MENU_OPCIONES` (nunca inventa un intent nuevo) o a
+    `"emocional"`. Devuelve `None` si no hay proposer, si falló, o si
+    no hay coincidencia clara — comportamiento sin cambios en ese caso."""
+    if proposer is None:
+        return None
+    opciones = [SelectionOption(id=cid, text=desc) for cid, desc in _CATEGORIAS_MENU_LLM.items()]
+    resultado = interpret_selection(texto, opciones, proposer)
+    if resultado.option is None:
+        return None
+    if resultado.option.id == "emocional":
+        return "emocional"
+    for ordinal, intent, _ in _MENU_OPCIONES:
+        if ordinal == resultado.option.id:
+            return intent
+    return None  # inalcanzable en la práctica: interpret_selection ya solo devuelve ids reales
+
+
+def _respuesta_expresion_emocional_menu() -> str:
+    return f"Lamento que te sientas así. Estoy aquí para ayudarte — ¿qué te gustaría hacer?\n{_MENU_NUMERADO}"
 
 
 def _resolver_por_intent(
@@ -1526,6 +1599,57 @@ def _clasificar_interrupcion_wizard(texto: str) -> Optional[str]:
     return None
 
 
+# Recado 064 — mismas 5 categorías de `_clasificar_interrupcion_wizard`
+# más `"es_el_dato"` (el mensaje NO es ninguna interrupción — debe
+# seguir tratándose como el código/documento esperado). Incluir esta
+# sexta opción explícita mejora la precisión del LLM (una salida
+# explícita para "ninguna de las anteriores", en vez de forzarlo a
+# elegir entre solo 5 categorías de interrupción) — se trata
+# exactamente igual que `None` en el código que llama.
+_CATEGORIAS_WIZARD_LLM = {
+    "salir": "el paciente quiere salir, cancelar o abandonar este proceso puntual",
+    "reenviar": "el paciente pide que le reenvíen o le manden de nuevo el código, dice que no le llegó",
+    "pregunta_correo": "el paciente pregunta a qué correo o email se envió o se enviará el código",
+    "consulta_citas": "el paciente pregunta por sus citas existentes, qué tiene reservado o agendado",
+    "emocional": "el paciente expresa una emoción, malestar, frustración o angustia, sin pedir ninguna acción concreta",
+    "es_el_dato": "el mensaje parece ser el dato exacto que se le pidió (un código de verificación o un número de documento) — no es ninguna interrupción",
+}
+
+
+def _clasificar_interrupcion_wizard_via_llm(texto: str, proposer: Optional[SelectionProposer]) -> Optional[str]:
+    """ÚLTIMO recurso (recado 064): solo tiene efecto cuando
+    `_clasificar_interrupcion_wizard` (determinista + fuzzy, arriba) no
+    encontró NADA. Mismo mecanismo verificado de
+    `core.selection.interpret_selection` que ya usa `HealthBrain` para
+    fecha/horario (recado 052) — la propuesta del LLM SOLO se acepta si
+    corresponde EXACTAMENTE a una de las 6 categorías reales de
+    `_CATEGORIAS_WIZARD_LLM`; nunca inventa una categoría nueva, nunca
+    inventa ni modifica el VALOR del código/documento en sí (eso sigue
+    100% en manos del matching determinista de siempre — este mecanismo
+    solo CLASIFICA, nunca EJECUTA ni interpreta el dato). Devuelve
+    `None` tanto si no hay proposer, si falló, si no hubo coincidencia
+    clara, como si la categoría es `"es_el_dato"` — en los 4 casos, el
+    llamador sigue con su comportamiento de siempre, sin cambios."""
+    if proposer is None:
+        return None
+    opciones = [SelectionOption(id=cid, text=desc) for cid, desc in _CATEGORIAS_WIZARD_LLM.items()]
+    resultado = interpret_selection(texto, opciones, proposer)
+    if resultado.option is None or resultado.option.id == "es_el_dato":
+        return None
+    return resultado.option.id
+
+
+def _clasificar_interrupcion_wizard_o_llm(gateway: HealthGateway, texto: str) -> Optional[str]:
+    """Punto de entrada único para ambos wizards (recado 062/063/064):
+    determinista/fuzzy primero (gratis, sin red, cubre la enorme
+    mayoría de casos reales ya vistos); el LLM verificado SOLO como
+    último recurso genuino, cuando lo anterior no encontró nada."""
+    categoria = _clasificar_interrupcion_wizard(texto)
+    if categoria is not None:
+        return categoria
+    return _clasificar_interrupcion_wizard_via_llm(texto, gateway.selection_proposer)
+
+
 def _reenviar_codigo(gateway: HealthGateway, pendiente: Dict[str, Any], documento: str) -> str:
     """Compartida entre ambos wizards — recibe `documento` explícito
     (cada uno lo guarda bajo una clave distinta en su propio dict:
@@ -1558,7 +1682,7 @@ def _respuesta_expresion_emocional_wizard() -> str:
 
 def _procesar_intento_de_codigo(gateway: HealthGateway, patient_reference: str, text: str) -> str:
     pendiente = gateway._pending_verifications[patient_reference]
-    categoria = _clasificar_interrupcion_wizard(text)
+    categoria = _clasificar_interrupcion_wizard_o_llm(gateway, text)
 
     if categoria == "salir":
         del gateway._pending_verifications[patient_reference]
@@ -1808,7 +1932,7 @@ def _gestionar_identificacion(gateway: HealthGateway, patient_reference: str, ch
         }
         return _MENSAJE_PEDIR_DOCUMENTO
 
-    categoria = _clasificar_interrupcion_wizard(text)
+    categoria = _clasificar_interrupcion_wizard_o_llm(gateway, text)
     if categoria == "salir":
         del gateway._pending_identity[patient_reference]
         return _MENSAJE_SALIR_GESTION_IDENTIDAD

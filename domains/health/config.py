@@ -123,6 +123,32 @@ class HealthBrainConfig:
 DEFAULT_HEALTH_BRAIN_CONFIG = HealthBrainConfig()
 
 
+def build_selection_proposer(config: HealthBrainConfig = DEFAULT_HEALTH_BRAIN_CONFIG):
+    """Recado 064 — extraído del interior de `build_health_brain` (antes
+    solo se construía ahí) para que OTROS componentes que necesiten
+    interpretación de selección/clasificación asistida por LLM (ej.
+    `HealthGateway`, recado 064) usen el MISMO gate — nunca una decisión
+    de activación separada, nunca una variable de entorno nueva. `None`
+    con el mismo criterio exacto de siempre: sin `HEALTH_BRAIN_TYPE=llm`,
+    o con ella pero sin `ANTHROPIC_API_KEY`, degrada en silencio (con
+    warning) al comportamiento sin LLM — jamás falla al arrancar."""
+    tipo = os.environ.get(config.env_var, "deterministico").strip().lower()
+    if tipo != "llm":
+        return None
+    api_key = os.environ.get(config.anthropic_api_key_env_var)
+    if not api_key:
+        logger.warning(
+            f"{config.env_var}=llm pero {config.anthropic_api_key_env_var} no está "
+            "configurada — sin interpretación asistida por LLM (selección/clasificación)."
+        )
+        return None
+    from core.selection import AnthropicSelectionProposer
+
+    return AnthropicSelectionProposer(
+        model=config.anthropic_model, api_key_env_var=config.anthropic_api_key_env_var
+    )
+
+
 def build_health_brain(
     activity_provider: Callable[[], Any],
     appointment_service: AppointmentService,
@@ -157,8 +183,8 @@ def build_health_brain(
         return HealthBrain(activity_provider, appointment_service)
 
     if tipo == "llm":
-        api_key = os.environ.get(config.anthropic_api_key_env_var)
-        if not api_key:
+        proposer = build_selection_proposer(config)
+        if proposer is None:
             logger.warning(
                 f"{config.env_var}=llm pero {config.anthropic_api_key_env_var} no está "
                 "configurada — cayendo al Brain determinista (HealthBrain). Configurar "
@@ -166,7 +192,6 @@ def build_health_brain(
                 "basado en LLM real."
             )
             return HealthBrain(activity_provider, appointment_service)
-        from core.selection import AnthropicSelectionProposer
 
         from .llm_brain import AnthropicResponseDrafter, HealthAnthropicBrain
 
@@ -179,12 +204,13 @@ def build_health_brain(
         # consulta como ÚLTIMO recurso (ver
         # `HealthBrain._interpretar_seleccion_asistida_por_llm`),
         # siempre verificada antes de usarse (`core/selection.py`).
+        # Recado 064: `build_selection_proposer` es ahora la fuente
+        # única de este gate — `HealthGateway` (wizards, ver
+        # gateway.py) lo reutiliza tal cual, sin duplicar esta lógica.
         brain_determinista = HealthBrain(
             activity_provider,
             appointment_service,
-            selection_proposer=AnthropicSelectionProposer(
-                model=config.anthropic_model, api_key_env_var=config.anthropic_api_key_env_var
-            ),
+            selection_proposer=proposer,
         )
         drafter = AnthropicResponseDrafter(
             model=config.anthropic_model, api_key_env_var=config.anthropic_api_key_env_var
