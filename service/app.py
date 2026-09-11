@@ -55,6 +55,7 @@ from fastapi.responses import JSONResponse
 from channels.chatwoot_channel import ChatwootChannel, ChatwootChannelError
 from channels.contract import OutboundMessage
 from channels.telegram_channel import TelegramChannel, TelegramChannelError
+from channels.web_channel import WebChannel, WebChannelError
 from domains.health.activity_source import MockActivitySource
 from domains.health.config import HealthConfigError, build_appointment_service, build_selection_proposer
 from domains.health.gateway import build_health_gateway, handle_inbound_message
@@ -130,6 +131,14 @@ def _construir_canal_telegram() -> TelegramChannel:
 
 
 _canal_telegram = _construir_canal_telegram()
+
+# WebChannel (recado 078/079) — sin ninguna variable de entorno que leer
+# (a diferencia de Chatwoot/Telegram): no hay secreto de webhook que
+# verificar ni URL externa a la que llamar para "enviar" — ver
+# `channels/web_channel.py` para por qué es estructuralmente el canal
+# más simple de los tres. Construcción directa, sin función `_construir_*`
+# propia (no hay nada que pueda faltar ni fallar al arrancar).
+_canal_web = WebChannel()
 
 
 @app.get("/health")
@@ -283,3 +292,65 @@ async def webhook_telegram(request: Request):
         logger.error("No se pudo enviar la respuesta a Telegram: %s", exc)
         return {"procesado": True, "respondido": False, "motivo": str(exc)}
     return {"procesado": True, "respondido": True}
+
+
+_MENSAJE_ERROR_GENERICO_WEB = (
+    "Tuvimos un problema procesando tu mensaje. Por favor intenta de nuevo en un momento."
+)
+
+
+@app.post("/webhook/web")
+async def webhook_web(request: Request):
+    """WebChannel (recado 078/079, `channels/web_channel.py`) — el canal
+    más simple de los tres: ciclo request/response síncrono de un solo
+    paso, sin cola de entrega separada real (se llena y se vacía en la
+    misma petición) ni `secret_token` que verificar (a diferencia de
+    Telegram) — decisión EXPLÍCITA del usuario para esta primera
+    versión, riesgo documentado en `.ai/RISKS.md` R-26 y
+    `.ai/API_CONTRACTS.md`, no bloqueante para desplegar hoy. Contrato
+    EXACTO que ya espera el Express de `eis-chat-hrmm` (recado 077,
+    confirmado leyendo su código fuente real): entrada
+    `{"message": str, "sessionId": str}`, salida `{"reply": str}` — JSON
+    simple, sin streaming NDJSON (a diferencia del n8n que reemplaza).
+
+    Todo el cuerpo corre dentro de un único `try/except Exception`
+    deliberadamente amplio — única excepción a "nunca atrapar Exception
+    genérico" de este archivo (los otros dos webhooks solo atrapan la
+    excepción propia de su canal): este es el único de los 3 endpoints
+    SIN ningún mecanismo que verifique el origen de la petición, así que
+    cualquiera que descubra la URL puede mandarle lo que sea — un body
+    que no es JSON, campos faltantes, o un fallo interno genuino del
+    dominio (Orchestrator/HealthBrain/guardrails, sin tocar) — y NINGUNO
+    de esos casos puede llegar al navegador como un 500 crudo (requisito
+    explícito del pedido): el widget de `eis-chat-hrmm`
+    (`public/index.html`) solo espera `response.json()` con forma
+    predecible tras su propio `fetch` — un 500 real interrumpiría esa
+    promesa de forma menos controlada que un `{"reply": "..."}` con 200,
+    aunque ambos casos ya muestran el mensaje de error del widget al
+    paciente (`eis-chat-hrmm` interpreta cualquier respuesta sin
+    `success: true` como error, ver recado 077). Se registra siempre en
+    el log (`logger.exception`, con traza completa), nunca en silencio."""
+    try:
+        payload = await request.json()
+        message = payload.get("message") if isinstance(payload, dict) else None
+        session_id = payload.get("sessionId") if isinstance(payload, dict) else None
+
+        try:
+            _canal_web.handle_request(message=message, session_id=session_id)
+        except WebChannelError as exc:
+            logger.warning("Webhook web rechazado: %s", exc)
+            return JSONResponse(status_code=200, content={"reply": _MENSAJE_ERROR_GENERICO_WEB})
+
+        mensaje = _canal_web.receive()
+        respuesta_texto = handle_inbound_message(
+            _gateway,
+            patient_reference=mensaje.conversation_id,
+            channel=_canal_web.canal,
+            message_id=mensaje.message_id,
+            text=mensaje.text,
+        )
+        _canal_web.send(OutboundMessage(conversation_id=mensaje.conversation_id, text=respuesta_texto))
+        return {"reply": respuesta_texto}
+    except Exception:
+        logger.exception("Fallo interno no anticipado procesando /webhook/web")
+        return JSONResponse(status_code=200, content={"reply": _MENSAJE_ERROR_GENERICO_WEB})

@@ -344,6 +344,137 @@ def test_arranque_funciona_sin_chatwoot_si_telegram_si_esta_configurado(monkeypa
     assert any("text" in b for b in llamadas)
 
 
+# ---------------------------------------------------------------------
+# WebChannel (recado 078/079) — contrato exacto {message, sessionId} -> {reply}.
+# ---------------------------------------------------------------------
+def test_webhook_web_contrato_exacto_message_sessionid_a_reply(app_module):
+    """Prueba de contrato (regla de `.claude/rules/testing.md`): confirma
+    la FORMA exacta que ya espera el Express de `eis-chat-hrmm` (recado
+    077) — entrada `{message, sessionId}`, salida ÚNICAMENTE `{"reply": str}`,
+    sin `success`/`sessionId` extra (a diferencia del contrato viejo con
+    n8n) — si esta forma cambia sin querer, este test debe fallar."""
+    client = TestClient(app_module.app)
+    r = client.post("/webhook/web", json={"message": "hola", "sessionId": "1789169744021"})
+
+    assert r.status_code == 200
+    cuerpo = r.json()
+    assert set(cuerpo.keys()) == {"reply"}
+    assert isinstance(cuerpo["reply"], str)
+    assert len(cuerpo["reply"]) > 0
+
+
+def test_webhook_web_sesion_persiste_entre_mensajes_del_mismo_sessionid(app_module):
+    """Confirma la correlación de conversación (`find_open_context`) vía
+    `sessionId` — dos peticiones HTTP separadas con el MISMO `sessionId`
+    (tal como lo reenvía el Express de `eis-chat-hrmm` mensaje a mensaje,
+    ahora persistente en localStorage del navegador) deben verse como la
+    MISMA conversación, no dos independientes."""
+    client = TestClient(app_module.app)
+    session_id = "1789169799840"
+
+    r1 = client.post("/webhook/web", json={"message": "hola", "sessionId": session_id})
+    assert r1.status_code == 200
+    assert "andrés" in r1.json()["reply"].lower() or "buenos" in r1.json()["reply"].lower() or "buenas" in r1.json()["reply"].lower()
+
+    r2 = client.post("/webhook/web", json={"message": "1", "sessionId": session_id})
+    assert r2.status_code == 200
+    # Segundo turno: ya no debe repetir la presentación institucional
+    # completa (`_saludo_primer_contacto` solo se antepone una vez).
+    assert "soy andrés" not in r2.json()["reply"].lower()
+
+
+def test_webhook_web_sin_message_responde_200_con_reply_generico(app_module):
+    """Requisito explícito del pedido: nunca un 500 crudo que rompa el
+    widget — un payload malformado (falta `message`, ej. un bug del lado
+    de `eis-chat-hrmm` o cualquiera que descubra la URL sin secreto que
+    verificar, ver `.ai/RISKS.md` R-26) responde 200 con un mensaje
+    genérico, nunca un error crudo."""
+    client = TestClient(app_module.app)
+    r = client.post("/webhook/web", json={"sessionId": "1789169744021"})
+    assert r.status_code == 200
+    assert set(r.json().keys()) == {"reply"}
+    assert len(r.json()["reply"]) > 0
+
+
+def test_webhook_web_sin_session_id_responde_200_con_reply_generico(app_module):
+    client = TestClient(app_module.app)
+    r = client.post("/webhook/web", json={"message": "hola"})
+    assert r.status_code == 200
+    assert set(r.json().keys()) == {"reply"}
+
+
+def test_webhook_web_body_no_json_responde_200_con_reply_generico(app_module):
+    client = TestClient(app_module.app)
+    r = client.post("/webhook/web", content=b"esto no es json", headers={"Content-Type": "application/json"})
+    assert r.status_code == 200
+    assert set(r.json().keys()) == {"reply"}
+
+
+def test_webhook_web_fallo_interno_no_produce_500(app_module, monkeypatch):
+    """Regresión análoga a `test_webhook_fallo_al_responder_a_chatwoot_no_produce_500`
+    (recado 012) y `test_webhook_telegram_fallo_al_responder_no_produce_500`
+    (recado 022/023), pero para un fallo INTERNO genuino del dominio (no
+    solo un fallo de canal al responder, que acá ni siquiera existe como
+    llamada de red — ver `channels/web_channel.py`): simula que
+    `handle_inbound_message` lanza una excepción no anticipada."""
+
+    def _handle_inbound_message_que_falla(*args, **kwargs):
+        raise RuntimeError("fallo simulado no anticipado del dominio")
+
+    monkeypatch.setattr(app_module, "handle_inbound_message", _handle_inbound_message_que_falla)
+
+    client = TestClient(app_module.app)
+    r = client.post("/webhook/web", json={"message": "hola", "sessionId": "1789169744021"})
+
+    assert r.status_code == 200
+    assert set(r.json().keys()) == {"reply"}
+    assert len(r.json()["reply"]) > 0
+
+
+def test_webhook_web_flujo_completo_end_to_end(app_module):
+    """Al menos 1 prueba real end-to-end (requisito explícito del pedido)
+    simulando una conversación completa vía este canal nuevo, contra el
+    Orchestrator/HealthBrain/guardrails REALES (sin ningún cambio ahí) —
+    solo `MockAppointmentService` (el default de `app_module`, sin
+    `HRMM_BACKEND_ENV`) evita red real hacia hrmm-backend, mismo criterio
+    que `test_webhook_telegram_flujo_completo_con_mock`. Guion basado en
+    el mismo catálogo/disponibilidad por defecto de `MockAppointmentService`
+    (`domains/health/appointment_service.py:_seed_fictional_data`, un solo
+    servicio real: "medicina general")."""
+    client = TestClient(app_module.app)
+    session_id = "1789169812626"
+
+    # Turno 1 — saludo institucional de primer contacto, sin conversación
+    # abierta todavía (mensaje sin intención reconocible).
+    r1 = client.post("/webhook/web", json={"message": "hola", "sessionId": session_id})
+    assert r1.status_code == 200
+    r1_texto = r1.json()["reply"].lower()
+    assert "andrés" in r1_texto
+    assert "1. reservar una cita" in r1_texto
+
+    # Turno 2 — responde al menú numerado ("1" = reservar), MISMO
+    # sessionId: debe reconocerse como continuación, no un mensaje nuevo
+    # sin contexto.
+    r2 = client.post("/webhook/web", json={"message": "1", "sessionId": session_id})
+    assert r2.status_code == 200
+    r2_texto = r2.json()["reply"].lower()
+    assert "fechas disponibles" in r2_texto or "medicina general" in r2_texto or "horarios disponibles" in r2_texto
+
+    # Turno 3 — elige la primera fecha ofrecida.
+    r3 = client.post("/webhook/web", json={"message": "1", "sessionId": session_id})
+    assert r3.status_code == 200
+    r3_texto = r3.json()["reply"].lower()
+    assert len(r3_texto) > 0
+
+    # Turno 4 — elige el primer horario ofrecido (si el turno anterior
+    # ya ofreció horarios) o sigue el guion — en cualquier caso, la
+    # conversación avanza sin caer en un error genérico ni en un 500.
+    r4 = client.post("/webhook/web", json={"message": "1", "sessionId": session_id})
+    assert r4.status_code == 200
+    assert "no se pudo procesar" not in r4.json()["reply"].lower()
+    assert "problema procesando" not in r4.json()["reply"].lower()
+
+
 def test_webhook_chatwoot_sin_configurar_responde_503_explicito(monkeypatch):
     """Contraparte del test anterior: si SÍ se invoca /webhook/chatwoot
     sin que esté configurado, nunca un 500 ni un silencio — 503 explícito."""

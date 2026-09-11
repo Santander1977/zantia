@@ -472,7 +472,12 @@ def _resolver_consulta_catalogo(gateway: "HealthGateway", request: PatientReques
 # identificación de 012/014/016 (documento -> código -> identidad_canal,
 # con vencimiento a 180 días y olvido a pedido) — cero código nuevo
 # hizo falta para esto, solo agregar "telegram" acá.
-_CANALES_SIN_IDENTIFICADOR_DOCUMENTO = {"chatwoot", "telegram"}
+#
+# Recado 079 — "web" (WebChannel, `channels/web_channel.py`): el
+# `sessionId` persistente del widget de `eis-chat-hrmm` tampoco es un
+# documento de identidad, mismo motivo exacto que Telegram/Chatwoot —
+# de nuevo, cero código nuevo en el gate en sí, solo esta línea.
+_CANALES_SIN_IDENTIFICADOR_DOCUMENTO = {"chatwoot", "telegram", "web"}
 
 
 @dataclass
