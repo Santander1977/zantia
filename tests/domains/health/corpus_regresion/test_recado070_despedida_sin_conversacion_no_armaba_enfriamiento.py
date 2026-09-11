@@ -75,7 +75,7 @@ def test_despedida_sin_conversacion_abierta_arma_el_enfriamiento():
     # armaba en este camino — este assert es la prueba DIRECTA de la
     # causa raíz, no solo de sus síntomas.
     assert ref in gateway._cierre_reciente, "la despedida sin conversación abierta debía armar el enfriamiento"
-    assert gateway._cierre_reciente[ref][2] is True  # es_despedida
+    assert gateway._cierre_reciente.obtener_payload(ref)[1] is True  # es_despedida
 
     r_inmediato = handle_inbound_message(gateway, ref, "demo", "m2", "hola")
     assert "estamos en pausa" in r_inmediato.lower(), (
@@ -87,8 +87,9 @@ def test_despedida_sin_conversacion_abierta_arma_el_enfriamiento():
 
     # Pasados los 2 minutos: contacto normal (saludo corto, recado 069
     # punto 4).
-    momento, nombre, es_desp = gateway._cierre_reciente[ref]
-    gateway._cierre_reciente[ref] = (momento - timedelta(minutes=3), nombre, es_desp)
+    payload = gateway._cierre_reciente.obtener_payload(ref)
+    momento = gateway._cierre_reciente.momento_de(ref)
+    gateway._cierre_reciente.registrar(ref, payload=payload, ahora=momento - timedelta(minutes=3))
     r_pasado = handle_inbound_message(gateway, ref, "demo", "m3", "hola")
     assert "estamos en pausa" not in r_pasado.lower()
     assert "puedo ayudarte" in r_pasado.lower()
@@ -104,7 +105,7 @@ def test_despedida_por_opcion_de_menu_5_sin_conversacion_tambien_arma_el_enfriam
     handle_inbound_message(gateway, ref, "demo", "m1", "hola")
     r_cierre = handle_inbound_message(gateway, ref, "demo", "m2", "5")
     assert "fue un gusto atenderte" in r_cierre.lower()
-    assert gateway._cierre_reciente[ref][2] is True
+    assert gateway._cierre_reciente.obtener_payload(ref)[1] is True
 
     r_inmediato = handle_inbound_message(gateway, ref, "demo", "m3", "necesito otra cita")
     assert "estamos en pausa" in r_inmediato.lower()

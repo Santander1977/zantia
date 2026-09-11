@@ -25,6 +25,36 @@
 
 **Hallazgo real que motivó este checklist** (recado 068): el `.env` real de esta máquina tiene `HEALTH_BRAIN_TYPE=llm` configurado — un bug real (`_evaluar_ventana_de_gracia` crasheaba con `AttributeError` con el LLM activo, ver `.ai/CONVERSATION_COVERAGE.md` fila 12) nunca se detectó porque ningún test previo ejercía esa combinación exacta. El corpus de regresión (`tests/domains/health/corpus_regresion/`) y la matriz de cobertura existen precisamente para que el PRÓXIMO hallazgo de este tipo se descubra corriendo la suite, no en una conversación real de un paciente.
 
+## `HRMM_BACKEND_URL` en producción — usar la red INTERNA de EasyPanel, nunca el dominio público (incidente 2026-09-11, recado 075)
+
+> Esta sección documenta un incidente real que tumbó ZANTIA por completo en producción (crash al arrancar, el proceso nunca llegaba a aceptar tráfico) — se deja permanente para que ninguna sesión futura repita la misma investigación desde cero.
+
+**[CONFIRMADO] Valor correcto de `HRMM_BACKEND_URL` cuando ZANTIA y hrmm-backend quedan en el mismo proyecto de EasyPanel:**
+
+```
+HRMM_BACKEND_URL=http://curson8n_hrmm-backend:8000
+```
+
+Dos detalles del formato que NO son errores de tipeo, son intencionales:
+- **`http`, no `https`** — es tráfico interno dentro de la red privada Docker del mismo proyecto EasyPanel, nunca sale a internet, no necesita ni debe llevar TLS en este salto.
+- **Guion bajo en el hostname (`curson8n_hrmm-backend`), no guion** — convención de EasyPanel/Docker para el nombre de servicio interno, DISTINTA del dominio público (`curson8n-hrmm-backend.byrp3l.easypanel.host`, con guion).
+
+**Por qué NO usar el dominio público** (`https://curson8n-hrmm-backend.byrp3l.easypanel.host`) **para este tráfico entre servicios**: ese dominio tiene un certificado válido de Let's Encrypt y funciona perfectamente desde AFUERA del proyecto (navegador, esta máquina local, cualquier cliente externo — verificado real: `openssl`/Python `ssl` confirmó el certificado válido, emisor Let's Encrypt, sujeto `*.byrp3l.easypanel.host`). El problema aparece SOLO cuando la conexión se origina DENTRO de otro contenedor del mismo proyecto EasyPanel hacia ese mismo dominio público: esa ruta de red interna no pasa por el proxy que termina el TLS válido — el paciente en ese punto ve un certificado autofirmado que Python (correctamente) rechaza. Usar la URL interna elimina el problema de raíz porque el tráfico nunca sale a internet — no es una forma de evadir seguridad, es la ruta de red correcta para tráfico que siempre fue interno.
+
+**Síntomas exactos a reconocer de inmediato la próxima vez** (para no repetir la investigación completa):
+
+1. Si `HRMM_BACKEND_URL` queda apuntando al dominio PÚBLICO por error, el proceso crashea al arrancar (`service/app.py`, `_appointment_service = build_appointment_service()` corre a nivel de módulo, sin `try/except` — cualquier fallo acá tumba el proceso ENTERO, nunca llega a levantar Uvicorn) con:
+   ```
+   ssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate (_ssl.c:1016)
+   ```
+2. Si `HRMM_BACKEND_URL` queda con el hostname interno correcto pero el ESQUEMA sigue siendo `https://` (en vez de `http://`) — un error de edición fácil de cometer al cambiar la URL — el síntoma es distinto:
+   ```
+   ssl.SSLError: [SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1016)
+   ```
+   (el cliente intenta un handshake TLS contra un servidor interno que habla HTTP plano en el puerto 8000 — confirmado con evidencia de código: `domains/health/hrmm_http.py` no tiene NINGUNA lógica de esquema propia, `RealHttpClient` delega 100% en `urllib.request.urlopen()`, que sí respeta el esquema de la URL recibida — verificado empíricamente con un servidor HTTP real local. Si aparece este error, la causa casi segura es el valor de la variable de entorno, no el código.)
+
+**Riesgo operacional real encontrado en el camino** (recado 075): al editar variables de entorno en el panel de EasyPanel, es fácil perder el NOMBRE de una variable por accidente (dejando solo el valor como una línea huérfana) o vaciar sin querer OTRAS variables sin relación con la que se estaba editando (en este incidente pasó con `HRMM_BACKEND_SECRET`/`TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`, ninguna relacionada con `HRMM_BACKEND_URL`). **Recomendación fija**: después de CUALQUIER edición de variables de entorno en EasyPanel, revisar la lista COMPLETA línea por línea (nombre Y valor de cada una, no solo la que se pretendía cambiar) antes de redesplegar — nunca asumir que el resto del panel quedó intacto.
+
 ## Checklist de pre-deploy
 
 > Consolidado el 2026-09-01 a partir de `.ai/RISKS.md` (detalle de impacto/evidencia ahí). Ver agente `deployment-checklist`, que solo verifica, nunca ejecuta el deploy.

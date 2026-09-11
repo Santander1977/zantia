@@ -54,6 +54,7 @@ from .brain import (
 from .confirmation import ConfirmationTracker
 from .institutional_info import INFORMACION_HOSPITAL
 from core.selection import SelectionOption, SelectionProposer, interpret_selection
+from core.timed_state import ModoVentana, TimedStateStore, VentanaDeTiempo
 from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
 from .intent import _PROGRAMAR as _PALABRAS_PROGRAMAR_CITA
 from .intent import _sin_tildes as _sin_tildes_menu
@@ -337,6 +338,13 @@ def _saludo_primer_contacto(nombre_conocido: Optional[str]) -> str:
     return f"{saludo_hora}. {_PRESENTACION_ANDRES} ¿Qué deseas hacer?\n{_MENU_NUMERADO}"
 
 
+# Recado 076 — `_cierre_reciente` (abajo, campo del dataclass) pasó de
+# ser un `Dict` construido a mano a un `TimedStateStore` (core, agnóstico
+# de dominio) — MISMO comportamiento observable, mecanismo genérico
+# extraído para que un dominio futuro lo reutilice (ver
+# `.ai/CORE_REUSABLE_PATTERNS.md`). Las 2 ventanas de abajo son ahora
+# `VentanaDeTiempo`, no `timedelta` sueltos — ningún cambio de duración.
+#
 # Recado 056, Punto 3 — pedido explícito del usuario: si el paciente
 # escribe de nuevo poco tiempo después de que su interacción anterior
 # cerró efectivamente (reserva confirmada/reprogramada/declinada), no
@@ -346,8 +354,10 @@ def _saludo_primer_contacto(nombre_conocido: Optional[str]) -> str:
 # suficientemente corto para significar "la misma sesión de uso", lo
 # bastante largo para cubrir que el paciente se distraiga un momento
 # antes de escribir de nuevo. Pasado ese umbral, se trata como un
-# regreso genuinamente nuevo (saludo completo de siempre).
-_VENTANA_SALUDO_CORTO = timedelta(minutes=30)
+# regreso genuinamente nuevo (saludo completo de siempre). Sin
+# `ModoVentana` asociado (no bloquea ni acumula nada — solo elige qué
+# saludo mostrar, ver nota de diseño en `core/timed_state.py`).
+_VENTANA_SALUDO_CORTO = VentanaDeTiempo(duracion=timedelta(minutes=30), modo=None, nombre="saludo_corto")
 
 # Recado 067 — enfriamiento de 2 minutos tras un cierre DEFINITIVO por
 # despedida/decline (nunca tras una reserva/reprogramación exitosa —
@@ -359,8 +369,11 @@ _VENTANA_SALUDO_CORTO = timedelta(minutes=30)
 # recién cerrado — deliberadamente NO se consulta mientras el
 # enfriamiento está activo: una despedida real ya cerró el tema, no
 # tiene sentido reinterrumpirlo). Duración fija de 2 minutos, pedida
-# explícitamente por el usuario.
-_VENTANA_ENFRIAMIENTO = timedelta(minutes=2)
+# explícitamente por el usuario. `ModoVentana.BLOQUEO`: el único modo
+# con uso real en producción hasta hoy — ver `core/timed_state.py`.
+_VENTANA_ENFRIAMIENTO = VentanaDeTiempo(
+    duracion=timedelta(minutes=2), modo=ModoVentana.BLOQUEO, nombre="enfriamiento"
+)
 
 
 def _mensaje_enfriamiento(segundos_restantes: int) -> str:
@@ -554,10 +567,18 @@ class HealthGateway:
     # exitosa — SOLO el primero activa el enfriamiento de 2 minutos
     # (`_VENTANA_ENFRIAMIENTO`, abajo); un paciente que acaba de
     # confirmar una reserva real puede seguir escribiendo de inmediato,
-    # sin ningún bloqueo. MISMA tupla/timestamp reutilizado para ambos
+    # sin ningún bloqueo. MISMO registro/timestamp reutilizado para ambos
     # propósitos (enfriamiento de 2 min Y saludo corto de 30 min) —
     # nunca un dict nuevo y paralelo.
-    _cierre_reciente: Dict[str, "tuple[datetime, Optional[str], bool]"] = field(default_factory=dict)
+    #
+    # Recado 076 — antes un `Dict[str, Tuple[datetime, Optional[str], bool]]`
+    # construido a mano; ahora un `TimedStateStore` (core/timed_state.py,
+    # agnóstico de dominio, extraído de este mismo mecanismo para que un
+    # dominio futuro lo reutilice — ver `.ai/CORE_REUSABLE_PATTERNS.md`).
+    # El `momento` real ahora lo gestiona el store; el payload que
+    # `HealthGateway` le pasa es `(nombre_conocido, es_despedida)` — MISMO
+    # comportamiento observable, sin ningún cambio de texto/tiempos.
+    _cierre_reciente: TimedStateStore = field(default_factory=TimedStateStore)
 
 
 def build_health_gateway(
@@ -705,22 +726,24 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
         return respuesta
 
     # Recado 067 — enfriamiento de 2 minutos tras un cierre DEFINITIVO
-    # por despedida/decline (`_cierre_reciente[...][2]`, `es_despedida`
-    # — nunca tras una reserva/reprogramación exitosa). Deliberadamente
-    # ANTES de la ventana de gracia (abajo): una despedida real ya
-    # cerró el tema por completo — no tiene sentido reevaluar si el
-    # siguiente mensaje "es una interrupción sobre lo recién cerrado",
-    # y NUNCA debe caer en el fallback genérico de "no logré
-    # identificar" durante este período. Se calcula el tiempo restante
-    # REAL en este mismo instante contra el timestamp guardado — nunca
+    # por despedida/decline (payload `(nombre, es_despedida)` en
+    # `_cierre_reciente` — nunca tras una reserva/reprogramación
+    # exitosa). Deliberadamente ANTES de la ventana de gracia (abajo):
+    # una despedida real ya cerró el tema por completo — no tiene
+    # sentido reevaluar si el siguiente mensaje "es una interrupción
+    # sobre lo recién cerrado", y NUNCA debe caer en el fallback
+    # genérico de "no logré identificar" durante este período. Se
+    # calcula el tiempo restante REAL en este mismo instante contra el
+    # timestamp guardado (recado 076: ahora vía `TimedStateStore`,
+    # `core/timed_state.py` — mismo cálculo, mecanismo genérico) — nunca
     # un cronómetro que se actualiza solo (ver docstring de
     # `_mensaje_enfriamiento`).
-    cierre_para_enfriamiento = gateway._cierre_reciente.get(patient_reference)
-    if cierre_para_enfriamiento is not None and cierre_para_enfriamiento[2]:
-        transcurrido = datetime.now(timezone.utc) - cierre_para_enfriamiento[0]
-        if transcurrido < _VENTANA_ENFRIAMIENTO:
-            segundos_restantes = int((_VENTANA_ENFRIAMIENTO - transcurrido).total_seconds()) + 1
-            return _mensaje_enfriamiento(segundos_restantes)
+    payload_cierre = gateway._cierre_reciente.obtener_payload(patient_reference)
+    es_despedida_reciente = payload_cierre is not None and payload_cierre[1]
+    if es_despedida_reciente and gateway._cierre_reciente.dentro_de_ventana(patient_reference, _VENTANA_ENFRIAMIENTO):
+        restante = gateway._cierre_reciente.tiempo_restante(patient_reference, _VENTANA_ENFRIAMIENTO)
+        segundos_restantes = int(restante.total_seconds()) + 1
+        return _mensaje_enfriamiento(segundos_restantes)
 
     # Ventana de gracia de un turno (recado 050, corrige el hallazgo del
     # recado 049): NO hay conversación abierta — puede ser porque nunca
@@ -826,10 +849,11 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
     # (`nombre_para_saludo`); si no hay (canal sin gate de identidad,
     # ej. "demo"), usar el que quedó guardado al cerrar la Activity
     # anterior.
-    cierre = gateway._cierre_reciente.get(patient_reference)
-    saludo_corto_aplica = cierre is not None and (datetime.now(timezone.utc) - cierre[0]) < _VENTANA_SALUDO_CORTO
+    saludo_corto_aplica = gateway._cierre_reciente.dentro_de_ventana(patient_reference, _VENTANA_SALUDO_CORTO)
     if saludo_corto_aplica:
-        nombre_efectivo = nombre_para_saludo or cierre[1]
+        payload_cierre = gateway._cierre_reciente.obtener_payload(patient_reference)
+        nombre_del_cierre = payload_cierre[0] if payload_cierre is not None else None
+        nombre_efectivo = nombre_para_saludo or nombre_del_cierre
         saludo_apertura = _saludo_corto_de_regreso(nombre_efectivo)
     else:
         saludo_apertura = _saludo_primer_contacto(nombre_para_saludo)
@@ -1102,7 +1126,7 @@ def _resolver_por_intent(
         # enfriamiento es ahora el comportamiento correcto, no una
         # regresión.
         nombre_conocido = _nombre_conocido(gateway, patient_reference)
-        gateway._cierre_reciente[patient_reference] = (datetime.now(timezone.utc), nombre_conocido, True)
+        gateway._cierre_reciente.registrar(patient_reference, payload=(nombre_conocido, True))
         return _texto_despedida(nombre_conocido)
 
     if intent == RequestIntent.INFORMACION_SERVICIO:
@@ -1381,7 +1405,7 @@ def _cerrar_si_definitivo(gateway: HealthGateway, patient_reference: str, contex
         # haber confirmado una reserva real, donde seguir conversando de
         # inmediato es normal y esperado.
         es_despedida = context.activity.management_status == ManagementStatus.DECLINED
-        gateway._cierre_reciente[patient_reference] = (datetime.now(timezone.utc), nombre_conocido, es_despedida)
+        gateway._cierre_reciente.registrar(patient_reference, payload=(nombre_conocido, es_despedida))
         return True
     return False
 

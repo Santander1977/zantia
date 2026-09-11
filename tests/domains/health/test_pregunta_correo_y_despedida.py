@@ -300,7 +300,7 @@ def test_hola_despues_de_opcion_salir_activa_el_enfriamiento_y_luego_saludo_cort
     r2 = handle_inbound_message(gateway, ref, "demo", "m2", "5")
     assert "fue un gusto atenderte" in r2.lower()
     assert find_open_context(gateway, ref) is None
-    assert gateway._cierre_reciente[ref][2] is True  # es_despedida -> arma el enfriamiento
+    assert gateway._cierre_reciente.obtener_payload(ref)[1] is True  # es_despedida -> arma el enfriamiento
 
     r3 = handle_inbound_message(gateway, ref, "demo", "m3", "Hola")
     assert "no logré identificar" not in r3.lower(), (
@@ -315,8 +315,9 @@ def test_hola_despues_de_opcion_salir_activa_el_enfriamiento_y_luego_saludo_cort
     # existiera el enfriamiento).
     from datetime import timedelta
 
-    momento, nombre, es_desp = gateway._cierre_reciente[ref]
-    gateway._cierre_reciente[ref] = (momento - timedelta(minutes=3), nombre, es_desp)
+    payload = gateway._cierre_reciente.obtener_payload(ref)
+    momento = gateway._cierre_reciente.momento_de(ref)
+    gateway._cierre_reciente.registrar(ref, payload=payload, ahora=momento - timedelta(minutes=3))
     r4 = handle_inbound_message(gateway, ref, "demo", "m4", "Hola")
     assert "no logré identificar" not in r4.lower(), (
         f"quedó atrapado en el error genérico pasado el enfriamiento: {r4!r}"

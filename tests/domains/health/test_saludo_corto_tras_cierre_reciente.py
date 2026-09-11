@@ -56,8 +56,9 @@ def test_regreso_pasado_el_umbral_recibe_saludo_completo_de_nuevo():
     # Simula que ya pasó más del umbral (31 minutos) — retrocede el
     # timestamp real guardado en el cierre, sin tocar ningún reloj global.
     patient_ref = "PAC-CORTO-2"
-    momento, nombre, es_despedida = gateway._cierre_reciente[patient_ref]
-    gateway._cierre_reciente[patient_ref] = (momento - timedelta(minutes=31), nombre, es_despedida)
+    payload = gateway._cierre_reciente.obtener_payload(patient_ref)
+    momento = gateway._cierre_reciente.momento_de(patient_ref)
+    gateway._cierre_reciente.registrar(patient_ref, payload=payload, ahora=momento - timedelta(minutes=31))
 
     r4 = handle_inbound_message(gateway, patient_ref, "demo", "m4", "hola")
     assert "hospital regional" in r4.lower(), f"pasado el umbral, debía ver el saludo completo: {r4!r}"
@@ -105,7 +106,7 @@ def test_nombre_conocido_del_cierre_se_usa_en_el_saludo_corto():
     from domains.health.gateway import _cerrar_si_definitivo
 
     _cerrar_si_definitivo(gateway, "PAC-CORTO-4", context)
-    assert gateway._cierre_reciente["PAC-CORTO-4"][1] == "Carlos"
+    assert gateway._cierre_reciente.obtener_payload("PAC-CORTO-4")[0] == "Carlos"  # nombre
 
     r4 = handle_inbound_message(gateway, "PAC-CORTO-4", "demo", "m4", "hola")
     assert "señor carlos" in r4.lower()
