@@ -256,6 +256,46 @@ _DESPEDIDA = (
 )
 _RE_PUNTUACION_DESPEDIDA = re.compile(r"[¡!¿?.,;:]")
 
+# Recado 069 — hallazgo real GRAVE, confirmado con evidencia exacta tras
+# 2 rondas previas de fixes (recados 057/067) que NO lo cubrían: un
+# "gracias" SOLO (sin ningún acompañamiento — no "no gracias ya
+# termine", solo "gracias"), "no gracias" solo, o "que descanses" solo,
+# NUNCA coincidían con `_DESPEDIDA` (arriba, exige frases de 3+
+# palabras salvo "chao"/"chau"/"adios"/"q(ue) tengas buen...") — el
+# paciente que se despedía con una de estas formas MUY comunes en
+# español coloquial nunca activaba ninguna categoría de cierre, y
+# `_enrutar_solicitud_nueva`/`_interpretar_*` lo trataban como mensaje
+# ambiguo sin intención, mostrando el MENÚ INSTITUCIONAL COMPLETO —
+# exactamente lo que el paciente real reportó ("la despedida sigue sin
+# funcionar").
+#
+# Mismo mecanismo YA probado y en producción para el caso simétrico de
+# saludos (`intent.py:_es_solo_saludo`, recado 048), pero por TOKEN en
+# vez de frase fija — un paciente real combina estas palabras en
+# cualquier orden ("no ya gracias", "ya no gracias", "gracias ya"), y
+# una lista de frases fijas nunca cubre todas las combinaciones.
+# CADA palabra del mensaje debe estar en `_PALABRAS_DE_CIERRE_SUELTAS`
+# (sin excepción — basta una palabra de contenido real para que NO
+# coincida: "gracias, ¿a qué hora es la cita?" nunca coincide, "a que
+# hora es la cita" no está en el conjunto). Además, al menos una
+# palabra debe ser una "ancla" inequívoca (`_ANCLAS_DE_CIERRE`) —
+# "no"/"ya"/"que" SUELTOS, sin ninguna ancla, NO cuentan como despedida
+# (demasiado ambiguos por sí solos — "no" ya tiene manejo específico
+# propio como declinación en varias etapas, `_es_negativo`; "ya"/"que"
+# son rellenos, nunca despedidas por sí mismos).
+_ANCLAS_DE_CIERRE = frozenset({"gracias", "descanses", "chao", "chau", "adios", "bye", "listo", "vemos"})
+_PALABRAS_DE_CIERRE_SUELTAS = _ANCLAS_DE_CIERRE | {"no", "ya", "muchas", "que", "q", "hasta", "luego", "pronto", "nos"}
+
+
+def _es_solo_despedida(texto_sin_tildes_y_puntuacion: str) -> bool:
+    palabras = texto_sin_tildes_y_puntuacion.split()
+    if not palabras:
+        return False
+    if not all(p in _PALABRAS_DE_CIERRE_SUELTAS for p in palabras):
+        return False
+    return any(p in _ANCLAS_DE_CIERRE for p in palabras)
+
+
 # Recado 067 — hallazgo real: "salir"/"exit" (recados 062/063, MISMA
 # lista antes vivía SOLO en gateway.py, usada por los wizards
 # independientes del Brain) NUNCA se reconocían dentro de una
@@ -290,10 +330,18 @@ def _es_despedida(texto: str) -> bool:
     """`_DESPEDIDA` compara sobre texto SIN puntuación — quita comas y
     signos ANTES de buscar, para que "no gracias, ya terminé" (coma
     real, natural en una despedida) siga matcheando "no gracias ya
-    termine"."""
+    termine".
+
+    Recado 069 — además de `_DESPEDIDA` (frases de 3+ palabras, salvo
+    excepciones puntuales), reconoce el mensaje COMPLETO cuando consiste
+    ÚNICAMENTE en palabras de cierre cortas ("gracias", "no gracias",
+    "que descanses" solos — ver `_es_solo_despedida`) — antes invisibles,
+    causa raíz confirmada del hallazgo real "la despedida sigue sin
+    funcionar" tras 2 rondas previas de fixes que no lo cubrían."""
     limpio = _RE_PUNTUACION_DESPEDIDA.sub(" ", texto)
     limpio = " ".join(limpio.split())
-    return _contains_any_sin_tildes(limpio, _DESPEDIDA)
+    limpio_sin_tildes = _sin_tildes(limpio).lower()
+    return _contains_any_sin_tildes(limpio, _DESPEDIDA) or _es_solo_despedida(limpio_sin_tildes)
 
 
 # Extraído a su propia función (mensaje urgente posterior al 058) para
@@ -304,18 +352,19 @@ def _es_despedida(texto: str) -> bool:
 # copiarlo literal en dos archivos (mismo criterio de import ya
 # establecido para `_lista_numerada`/`_formatear_fecha_humana`).
 def _texto_despedida(nombre: Optional[str]) -> str:
-    """Recado 067 — un solo mensaje limpio, cierre real (nunca la
-    pregunta "¿puedo ayudarte en algo más?" antepuesta — ver el bug de
-    duplicación corregido en `gateway.py:handle_inbound_message`,
-    `es_cierre`). Menciona el enfriamiento real de 2 minutos que
-    `gateway.py:_cerrar_si_definitivo`/`_VENTANA_ENFRIAMIENTO` aplican a
-    partir de este mismo mensaje — texto y mecanismo siempre
-    sincronizados (nunca una promesa sin mecanismo detrás)."""
-    despedida = f"¡Con gusto, {nombre}!" if nombre else "¡Con gusto!"
-    return (
-        f"{despedida} Que tengas buen día. Aquí estaré si necesitas algo más. "
-        "En 2 minutos podremos atender otra solicitud si la necesitas."
-    )
+    """Recado 069 — texto EXACTO pedido explícitamente por el usuario
+    (recados 057/067 usaban una variante más informal, "Aquí estaré si
+    necesitas algo más", que podía leerse como disponibilidad
+    INMEDIATA — contradice el enfriamiento real de 2 minutos que sigue
+    a este mensaje). Un solo mensaje limpio, cierre real: NUNCA la
+    pregunta "¿puedo ayudarte en algo más?" antepuesta (`es_cierre`,
+    `gateway.py:handle_inbound_message`), NUNCA el menú numerado. "En 2
+    minutos" está sincronizado con el mecanismo real
+    (`gateway.py:_VENTANA_ENFRIAMIENTO`) — nunca una promesa sin
+    mecanismo detrás."""
+    if nombre:
+        return f"Fue un gusto atenderte, {nombre}. En 2 minutos estaremos disponibles nuevamente si necesitas algo más. ¡Hasta pronto!"
+    return "Fue un gusto atenderte. En 2 minutos estaremos disponibles nuevamente si necesitas algo más. ¡Hasta pronto!"
 # Recado 053, Parte 3 — pedido explícito del usuario: un mensaje
 # emocional/personal real ("me deprime ir al médico", "estoy
 # deprimido/a", "esto me tiene angustiada") NO es lo mismo que un typo o

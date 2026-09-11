@@ -307,18 +307,24 @@ _VENTANA_ENFRIAMIENTO = timedelta(minutes=2)
 
 
 def _mensaje_enfriamiento(segundos_restantes: int) -> str:
-    """Recado 067 — decisión de diseño explícita (evaluada entre 3
-    alternativas, ver recado): NUNCA un cronómetro que se actualiza
-    solo (Telegram no lo soporta sin mandar mensajes repetidos, que se
-    sentiría como spam) — en vez de eso, se CALCULA el tiempo restante
-    real EN EL MOMENTO en que el paciente escribe de nuevo, contra el
-    timestamp real guardado (`_cierre_reciente`). Nunca miente: si
+    """Recado 069 — formato EXACTO pedido explícitamente por el
+    usuario: "Aún estamos en pausa — podremos atenderte de nuevo en
+    [X] minuto(s) y [Y] segundos." (recado 067 usaba solo segundos,
+    sin desglosar minutos). Decisión de diseño ya evaluada en el
+    recado 067, sin cambios: NUNCA un cronómetro que se actualiza solo
+    (Telegram no lo soporta sin mandar mensajes repetidos, que se
+    sentiría como spam) — se CALCULA el tiempo restante real EN EL
+    MOMENTO en que el paciente escribe de nuevo, contra el timestamp
+    real guardado (`_cierre_reciente`). Nunca miente: si
     `segundos_restantes <= 0` (llegó a escribir justo en el límite),
     no debería llamarse esta función — el llamador ya lo trata como
-    ventana vencida."""
-    if segundos_restantes <= 10:
-        return f"Ya casi — faltan {segundos_restantes} segundos para poder atenderte de nuevo."
-    return f"Aún faltan {segundos_restantes} segundos para poder atenderte de nuevo."
+    ventana vencida. Esta es la ÚNICA respuesta posible mientras el
+    enfriamiento está activo — nunca procesa la solicitud, nunca
+    muestra el menú, nunca pregunta nada más (requisito explícito)."""
+    minutos, segundos = divmod(max(segundos_restantes, 0), 60)
+    texto_minutos = f"{minutos} minuto" + ("s" if minutos != 1 else "")
+    texto_segundos = f"{segundos} segundo" + ("s" if segundos != 1 else "")
+    return f"Aún estamos en pausa — podremos atenderte de nuevo en {texto_minutos} y {texto_segundos}."
 
 
 def _saludo_corto_de_regreso(nombre_conocido: Optional[str]) -> str:

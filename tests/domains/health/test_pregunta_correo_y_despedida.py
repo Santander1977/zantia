@@ -56,7 +56,7 @@ def test_reproduce_conversacion_real_completa_cierre_pregunta_despedida():
 
     r5 = handle_inbound_message(gateway, "PAC-058", "demo", "m5", "no gracias ya termine")
     assert "nombre tal como aparece" not in r5.lower(), f"no debía interpretarlo como un servicio: {r5!r}"
-    assert "con gusto" in r5.lower() and "buen día" in r5.lower()
+    assert "fue un gusto atenderte" in r5.lower() and "hasta pronto" in r5.lower()
 
 
 # ---------------------------------------------------------------------
@@ -78,7 +78,7 @@ def test_varias_formas_de_despedida_cierran_la_conversacion(texto):
     )
     handle_inbound_message(gateway, f"PAC-DESP-{hash(texto)}", "demo", "m1", "necesito una cita")
     respuesta = handle_inbound_message(gateway, f"PAC-DESP-{hash(texto)}", "demo", "m2", texto)
-    assert "con gusto" in respuesta.lower()
+    assert "fue un gusto atenderte" in respuesta.lower()
     assert "nombre tal como aparece" not in respuesta.lower()
     assert "no logré identificar" not in respuesta.lower()
 
@@ -152,7 +152,7 @@ def test_pregunta_sobre_correo_usa_estado_real_de_la_herramienta(enviado, fragme
 class _DrafterQueVariaCalidez:
     def draft(self, mensaje_paciente: str, texto_base: str) -> str:
         return texto_base.replace("Buena pregunta —", "Qué bueno que preguntas —").replace(
-            "¡Con gusto!", "¡Fue un placer ayudarte!"
+            "Fue un gusto atenderte", "Fue un placer haberte atendido"
         )
 
 
@@ -193,7 +193,7 @@ def test_despedida_funciona_igual_con_llm_activo():
 
     assert salida_llm.propuesta_de_actualizacion_de_estado == salida_determinista.propuesta_de_actualizacion_de_estado
     assert salida_llm.propuesta_de_actualizacion_de_estado["datos_recopilados"]["decision"] == "DECLINED"
-    assert "fue un placer ayudarte" in salida_llm.respuesta_propuesta.lower()
+    assert "fue un placer haberte atendido" in salida_llm.respuesta_propuesta.lower()
 
 
 # ---------------------------------------------------------------------
@@ -222,7 +222,7 @@ def test_reproduce_bucle_real_de_despedida_sin_conversacion_abierta():
         assert "no logré identificar" not in respuesta.lower(), (
             f"quedó atrapado en el loop del menú con: {texto!r} -> {respuesta!r}"
         )
-        assert "con gusto" in respuesta.lower()
+        assert "fue un gusto atenderte" in respuesta.lower()
 
 
 # ---------------------------------------------------------------------
@@ -240,7 +240,7 @@ def test_opcion_de_menu_salir_cierra_la_conversacion(texto):
     ref = f"PAC-SALIR-{hash(texto)}"
     handle_inbound_message(gateway, ref, "demo", "m1", "hola")
     respuesta = handle_inbound_message(gateway, ref, "demo", "m2", texto)
-    assert "con gusto" in respuesta.lower()
+    assert "fue un gusto atenderte" in respuesta.lower()
     assert find_open_context(gateway, ref) is None
 
 
@@ -273,7 +273,7 @@ def test_hola_despues_de_opcion_salir_muestra_saludo_institucional_completo():
     assert "1. reservar una cita" in r1.lower(), f"m1 debía mostrar el menú: {r1!r}"
 
     r2 = handle_inbound_message(gateway, ref, "demo", "m2", "5")
-    assert "con gusto" in r2.lower()
+    assert "fue un gusto atenderte" in r2.lower()
     assert find_open_context(gateway, ref) is None
 
     r3 = handle_inbound_message(gateway, ref, "demo", "m3", "Hola")

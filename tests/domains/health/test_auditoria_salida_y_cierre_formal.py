@@ -69,7 +69,18 @@ class _ServicioDosOpciones(MockAppointmentService):
 
 
 def _texto_es_cierre(texto: str) -> bool:
-    return "en 2 minutos podremos atender otra solicitud" in texto.lower()
+    """Recado 069 — texto EXACTO pedido por el usuario. Confirma
+    también las 2 prohibiciones explícitas: nunca la pregunta "¿algo
+    más?" ni el menú numerado en el mismo mensaje."""
+    minusculas = texto.lower()
+    es_el_texto_de_cierre = (
+        "fue un gusto atenderte" in minusculas
+        and "en 2 minutos estaremos disponibles nuevamente" in minusculas
+        and "hasta pronto" in minusculas
+    )
+    sin_pregunta_de_mas = "puedo ayudarte en algo" not in minusculas and "puedo ayudarlo en algo" not in minusculas
+    sin_menu = "1. reservar una cita" not in minusculas
+    return es_el_texto_de_cierre and sin_pregunta_de_mas and sin_menu
 
 
 def _texto_es_fallback_generico(texto: str) -> bool:
@@ -99,14 +110,18 @@ def test_despedida_nunca_duplica_mensajes(texto):
 
 
 def test_mensaje_ambiguo_sin_despedida_sigue_dando_un_solo_mensaje():
-    """Control: un mensaje genuinamente ambiguo (ni despedida ni
+    """Control: un mensaje genuinamente ambiguo (ni despedida — ni
+    siquiera con el reconocimiento ampliado del recado 069 — ni
     intención reconocible) sigue dando UN solo mensaje (el saludo o el
-    fallback), nunca dos concatenados — el fix no debía romper esto."""
+    fallback), nunca dos concatenados — el fix no debía romper esto.
+    Recado 069: "gracias" sola AHORA es despedida a propósito (ver
+    `test_despedida_nunca_duplica_mensajes`), así que este control usa
+    una frase que sigue sin ser ninguna de las dos cosas."""
     gateway = build_health_gateway(MockActivitySource(), MockAppointmentService(), ReminderManager(), MockActivityResultSink())
     ref = "PAC-AMBIGUO"
     gateway._cierre_reciente[ref] = (datetime.now(timezone.utc), "Paciente Ficticio", False)
-    r = handle_inbound_message(gateway, ref, "demo", "m1", "gracias")
-    assert r.count("¡Buenas") <= 1 and "que tengas buen día" not in r.lower()
+    r = handle_inbound_message(gateway, ref, "demo", "m1", "mmm no se")
+    assert r.count("¡Buenas") <= 1 and "fue un gusto atenderte" not in r.lower()
 
 
 # ---------------------------------------------------------------------
@@ -300,15 +315,17 @@ def test_enfriamiento_informa_tiempo_restante_real():
     assert gateway._cierre_reciente[ref][2] is True  # es_despedida
 
     r_durante = handle_inbound_message(gateway, ref, "demo", "m3", "hola de nuevo")
-    assert "segundos para poder atenderte de nuevo" in r_durante.lower()
+    assert "estamos en pausa" in r_durante.lower()
+    assert "podremos atenderte de nuevo en 2 minutos y 0 segundos" in r_durante.lower()
     assert "no logré identificar" not in r_durante.lower()
 
     # Simula que ya pasaron 90 de los 120 segundos — el tiempo restante
-    # informado debe reflejarlo (no un valor fijo).
+    # informado debe reflejarlo (no un valor fijo): quedan 30 segundos,
+    # 0 minutos.
     momento, nombre, es_desp = gateway._cierre_reciente[ref]
     gateway._cierre_reciente[ref] = (momento - timedelta(seconds=90), nombre, es_desp)
     r_casi = handle_inbound_message(gateway, ref, "demo", "m4", "ya?")
-    assert "ya casi" in r_casi.lower() or "faltan 3" in r_casi.lower() or "faltan 2" in r_casi.lower()
+    assert "0 minutos y 30 segundos" in r_casi.lower()
 
 
 def test_pasado_el_enfriamiento_es_un_contacto_completamente_nuevo():
