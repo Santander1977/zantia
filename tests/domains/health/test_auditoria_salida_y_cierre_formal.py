@@ -137,7 +137,12 @@ def test_feedback_con_digito_suelto_no_se_confunde_con_seleccion_de_fecha():
     handle_inbound_message(gateway, ref, "demo", "m1", "necesito una cita")
     r = handle_inbound_message(gateway, ref, "demo", "m2", _MENSAJE_FEEDBACK)
     assert _texto_es_fallback_generico(r), f"debía caer en el fallback genérico de aclaración: {r!r}"
-    assert "domingo" not in r.lower() and "sabado" not in r.lower() and "lunes" not in r.lower()
+    # Recado 070: el fallback genérico ahora repite legítimamente la
+    # lista de fechas YA ofrecida (mismo fix que corrige "¿es la 1, la
+    # 2 o la 3?" sin contexto) — lo que NUNCA debe pasar es que el
+    # feedback largo del paciente se cuele tal cual dentro de la
+    # respuesta (eso sí sería la confusión real que este test protege).
+    assert _MENSAJE_FEEDBACK.lower() not in r.lower()
 
 
 def test_feedback_con_digito_suelto_no_reserva_una_cita_real():
@@ -338,7 +343,12 @@ def test_pasado_el_enfriamiento_es_un_contacto_completamente_nuevo():
     gateway._cierre_reciente[ref] = (momento - timedelta(minutes=3), nombre, es_desp)
     r = handle_inbound_message(gateway, ref, "demo", "m3", "hola")
     assert "segundos para poder atenderte" not in r.lower()
-    assert "buenas" in r.lower() and "puedo ayudarte" in r.lower()  # saludo corto (aún dentro de los 30 min)
+    # Recado 072 — fragilidad real detectada: "buenas" no cubre "Buenos
+    # días" (franja 05:00-11:59, `_franja_horaria_saludo`, gateway.py) —
+    # este test fallaba en horas de la mañana. Saludo corto (aún dentro
+    # de los 30 min) puede ser cualquiera de las 3 franjas reales.
+    saludo_corto = any(f in r.lower() for f in ("buenos días", "buenas tardes", "buenas noches"))
+    assert saludo_corto and "puedo ayudarte" in r.lower(), f"esperaba un saludo corto real: {r!r}"
 
 
 def test_reserva_confirmada_nunca_activa_el_enfriamiento():

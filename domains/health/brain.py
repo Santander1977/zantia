@@ -478,13 +478,19 @@ _VARIANTES_SERVICIO_NO_IDENTIFICADO = (
     "No logré identificar cuál de estos prefieres:\n{opciones}\n¿Me confirmas el nombre tal como aparece en la lista?",
     "Perdona, no reconocí cuál de estos servicios quieres:\n{opciones}\n¿Me lo repites tal cual aparece ahí?",
 )
+# Recado 070 — hallazgo real, confirmado en varias conversaciones de
+# hoy: estas 2 variantes (a diferencia de TODAS las demás de este
+# bloque, que ya llevan `{opciones}`) pedían "¿es la 1, la 2 o la 3?"
+# SIN repetir la lista — el paciente tenía que recordar de memoria qué
+# era cada número. Ahora incluyen `{opciones}`, mismo formato/criterio
+# que el resto (número + dato real, nunca solo el número).
 _VARIANTES_SELECCION_NO_IDENTIFICADA = (
-    "No logré identificar cuál prefieres — ¿me confirmas si es la 1, la 2 o la 3?",
-    "No estoy seguro de haber entendido cuál elegiste — ¿me dices si es la 1, la 2 o la 3?",
+    "No logré identificar cuál prefieres:\n{opciones}\n¿me confirmas si es la 1, la 2 o la 3?",
+    "No estoy seguro de haber entendido cuál elegiste:\n{opciones}\n¿me dices si es la 1, la 2 o la 3?",
 )
 _VARIANTES_FECHA_NO_IDENTIFICADA = (
-    "No logré identificar cuál fecha prefieres — ¿me confirmas si es la 1, la 2 o la 3?",
-    "Perdona, no reconocí cuál de esas fechas elegiste — ¿me dices si es la 1, la 2 o la 3?",
+    "No logré identificar cuál fecha prefieres:\n{opciones}\n¿me confirmas si es la 1, la 2 o la 3?",
+    "Perdona, no reconocí cuál de esas fechas elegiste:\n{opciones}\n¿me dices si es la 1, la 2 o la 3?",
 )
 # Ambigüedad genuina de servicio (recado 036) — el paciente escribió
 # algo que se parece razonablemente a MÁS DE UN servicio real (ej.
@@ -612,16 +618,45 @@ _RE_PALABRA = r"\b{}\b"
 _MAX_PALABRAS_ORDINAL_SUELTO = 8
 
 
+# Recado 069/070 — ampliada de 3 a 10 posiciones: hasta el 067, el único
+# llamador real (fecha/horario/reprogramación) nunca ofrecía más de 3
+# opciones a la vez, así que 3 bastaba. La selección de SERVICIO
+# (`_interpretar_servicio`, recado 070) reutiliza esta MISMA función
+# contra un catálogo real de 5 (hoy) — nunca inventar un mapeo paralelo
+# solo para llegar a 5. Cada llamador sigue validando
+# `indice < len(opciones)` (ver `_elegir_opcion`/`_elegir_opcion_ordinal`),
+# así que ampliar el rango acá es inofensivo para los llamadores que de
+# verdad solo ofrecen 3: un "4"/"5" que no aplica simplemente nunca
+# cruza esa validación.
+_ORDINALES_SUELTOS: tuple = (
+    ("1", 0), ("primera", 0),
+    ("2", 1), ("segunda", 1),
+    ("3", 2), ("tercera", 2),
+    ("4", 3), ("cuarta", 3),
+    ("5", 4), ("quinta", 4),
+    ("6", 5), ("sexta", 5),
+    ("7", 6), ("septima", 6),
+    ("8", 7), ("octava", 7),
+    ("9", 8), ("novena", 8),
+    ("10", 9), ("decima", 9),
+)
+
+
 def _indice_ordinal_seguro(texto: str) -> Optional[int]:
-    """Devuelve el índice (0/1/2) de la opción "1"/"primera", "2"/
-    "segunda", o "3"/"tercera" reconocida como ordinal SUELTO en
-    `texto` — `None` si no hay ninguna coincidencia, o si el mensaje es
-    demasiado largo para ser una respuesta directa a una pregunta de
-    selección (ver docstring del módulo arriba)."""
+    """Devuelve el índice (0-9) de la opción "1"/"primera" ... "10"/
+    "décima" reconocida como ordinal SUELTO en `texto` — `None` si no
+    hay ninguna coincidencia, o si el mensaje es demasiado largo para
+    ser una respuesta directa a una pregunta de selección (ver
+    docstring del módulo arriba). `texto` se compara sin tildes
+    (`_sin_tildes`) para que "séptima"/"décima" con o sin tilde
+    coincidan igual — mismo criterio que el resto del archivo.
+
+    Recado 070 — rango ampliado de 3 a 10 posiciones."""
     if len(texto.split()) > _MAX_PALABRAS_ORDINAL_SUELTO:
         return None
-    for clave, indice in (("1", 0), ("primera", 0), ("2", 1), ("segunda", 1), ("3", 2), ("tercera", 2)):
-        if re.search(_RE_PALABRA.format(re.escape(clave)), texto):
+    texto_sin_tildes = _sin_tildes(texto)
+    for clave, indice in _ORDINALES_SUELTOS:
+        if re.search(_RE_PALABRA.format(re.escape(clave)), texto_sin_tildes):
             return indice
     return None
 
@@ -747,17 +782,34 @@ def _horario_coincide_nivel2(texto_normalizado: str, hora_24: str) -> bool:
     return bool(hora_sola) and bool(re.search(_RE_PALABRA.format(re.escape(hora_sola)), texto_normalizado))
 
 
-def _emparejar_horario_por_texto(texto: str, horas: List[str]) -> Tuple[Optional[str], List[str]]:
+def _emparejar_horario_por_texto(
+    texto: str, horas: List[str], mostrar: Optional[List[str]] = None
+) -> Tuple[Optional[str], List[str]]:
     """Mismo contrato que `_emparejar_fecha_por_texto`, sobre la lista
     de horas REALES ya ofrecidas (`datos["horas_ofrecidas"]`, paralela a
-    `datos["opciones_horario"]` por índice)."""
+    `datos["opciones_horario"]` por índice).
+
+    Recado 070 — hallazgo real contra hrmm-backend PRODUCCIÓN: `horas`
+    puede tener valores REPETIDOS (dos médicos distintos ofreciendo la
+    MISMA hora en consultorios distintos — nunca ocurre con el catálogo
+    ficticio de los tests, donde cada hora es única). Antes, cuando el
+    texto del paciente era ambiguo entre 2+ horas, los candidatos
+    devueltos eran la hora bare ("07:30") — si las 2 opciones reales en
+    disputa comparten esa misma hora, el mensaje de aclaración quedaba
+    con 2 líneas IDÉNTICAS ("1. 07:30\\n2. 07:30"), inútil para elegir.
+    `mostrar` (opcional, paralelo a `horas` por índice — normalmente
+    `datos["horas_display_ofrecidas"]`, SIEMPRE con el consultorio) se
+    usa para los candidatos devueltos en vez de la hora bare, cuando se
+    provee — nunca cambia CUÁLES índices matchean, solo cómo se
+    presentan."""
     texto_normalizado = _sin_tildes(texto).lower()
+    mostrar_efectivo = mostrar if mostrar is not None else horas
     for nivel in (_horario_coincide_nivel1, _horario_coincide_nivel2):
-        candidatos = [h for h in horas if nivel(texto_normalizado, h)]
-        if len(candidatos) == 1:
-            return candidatos[0], []
-        if len(candidatos) >= 2:
-            return None, candidatos
+        indices = [i for i, h in enumerate(horas) if nivel(texto_normalizado, h)]
+        if len(indices) == 1:
+            return horas[indices[0]], []
+        if len(indices) >= 2:
+            return None, [mostrar_efectivo[i] for i in indices]
     return None, []
 
 
@@ -1469,11 +1521,33 @@ class HealthBrain:
         `_emparejar_servicio_por_similitud`) antes de rendirse al
         fallback — nunca inventa un servicio que no exista en el
         catálogo real, y nunca elige por el paciente si el texto es
-        ambiguo entre dos o más servicios reales."""
+        ambiguo entre dos o más servicios reales.
+
+        Recado 070 — hallazgo real de producción: el paciente ve la
+        lista numerada (`_lista_numerada`, recado 054) y responde con el
+        ordinal ("3" para elegir la 3ra opción mostrada), igual que ya
+        funciona para fecha/horario/menú/reprogramación — pero esta
+        función NUNCA aceptó un ordinal (confirmado con `git log`: desde
+        que existe, recado 030, solo hizo match por nombre; el commit
+        `d7d4835`, recado 036, documenta explícitamente que fecha/
+        horario "no necesitan el mismo tratamiento [de fuzzy matching]
+        (selección por ordinal, no por nombre libre)" — la ausencia de
+        ordinal acá fue una decisión de diseño original, nunca una
+        regresión de un recado posterior). Se revisa el ordinal PRIMERO
+        (mismo `_indice_ordinal_seguro` ya usado por `_elegir_opcion`),
+        contra el catálogo EXACTO en el mismo orden que se le mostró al
+        paciente (`list_services()`, sin reordenar) — si no hay ordinal,
+        cae al match por nombre/fuzzy de siempre, sin cambios."""
         listar = getattr(self._appointment_service, "list_services", None)
         servicios = listar() if listar else []
-        normalizado = _sin_tildes(texto)
-        elegido = next((s for s in servicios if _sin_tildes(s.lower()) in normalizado), None)
+        elegido = None
+        if servicios:
+            indice = _indice_ordinal_seguro(texto)
+            if indice is not None and indice < len(servicios):
+                elegido = servicios[indice]
+        if elegido is None:
+            normalizado = _sin_tildes(texto)
+            elegido = next((s for s in servicios if _sin_tildes(s.lower()) in normalizado), None)
         candidatos_ambiguos: List[str] = []
         if elegido is None and servicios:
             # Match exacto/substring (arriba) no encontró nada — antes
@@ -1641,10 +1715,11 @@ class HealthBrain:
                 )
                 respuesta = variante.format(opciones=texto_candidatos)
             else:
+                texto_fechas = _lista_numerada([_formatear_fecha_humana(f) for f in fechas])
                 variante, nuevos = _elegir_variante(
                     _VARIANTES_FECHA_NO_IDENTIFICADA, datos, "intentos_aclaracion_fecha"
                 )
-                respuesta = variante
+                respuesta = variante.format(opciones=texto_fechas)
             return BrainOutput(
                 respuesta_propuesta=respuesta,
                 proxima_accion_propuesta="preguntar_dato_faltante",
@@ -1690,17 +1765,6 @@ class HealthBrain:
             # PASO 2 con disponibilidad fresca en vez de dejar al
             # paciente sin ninguna salida.
             return self._ofrecer_fechas({**datos, "etapa": "esperando_fecha"})
-        nuevos = {
-            **datos,
-            "etapa": "esperando_horario",
-            "opciones_horario": [o.slot_id for o in opciones],
-            # Paralela a "opciones_horario" por índice (recado 051) — la
-            # hora REAL tal como se le mostró al paciente, para poder
-            # reconocerla si la repite en texto libre en vez de un
-            # ordinal (_emparejar_horario_por_texto). Nunca se usa para
-            # nada más que comparar contra el texto de la respuesta.
-            "horas_ofrecidas": [o.time for o in opciones],
-        }
         fecha_legible = _formatear_fecha_humana(fecha)
         # Recado 054 — lista numerada. Si TODAS las opciones comparten el
         # mismo consultorio (caso real más común: un solo profesional
@@ -1718,6 +1782,32 @@ class HealthBrain:
         else:
             intro = f"Para el {fecha_legible}, estos son los horarios disponibles:"
             lista_horarios = _lista_numerada([f"{o.time} en {o.location}" for o in opciones])
+        # Recado 070 (hallazgo real contra hrmm-backend PRODUCCIÓN, no
+        # reproducible con el catálogo ficticio de los tests — dos
+        # médicos reales del mismo servicio ofrecen la MISMA hora en
+        # consultorios distintos): "horas_ofrecidas" (solo la hora, sin
+        # consultorio) deja de ser suficiente para distinguir opciones
+        # cuando hay horas repetidas ("07:30" y "07:30") — se guarda
+        # ADEMÁS `horas_display_ofrecidas`, SIEMPRE con el consultorio
+        # incluido (a diferencia de `lista_horarios` arriba, que lo omite
+        # cuando es el mismo para todas — acá se necesita SIEMPRE
+        # inequívoco, incluso en ese caso, para desambiguar candidatos
+        # ambiguos) y el texto YA renderizado de la oferta completa
+        # (`texto_horario_ofrecido`), para repetirlo fielmente si hace
+        # falta una aclaración más abajo.
+        nuevos = {
+            **datos,
+            "etapa": "esperando_horario",
+            "opciones_horario": [o.slot_id for o in opciones],
+            # Paralela a "opciones_horario" por índice (recado 051) — la
+            # hora REAL tal como se le mostró al paciente, para poder
+            # reconocerla si la repite en texto libre en vez de un
+            # ordinal (_emparejar_horario_por_texto). Nunca se usa para
+            # nada más que comparar contra el texto de la respuesta.
+            "horas_ofrecidas": [o.time for o in opciones],
+            "horas_display_ofrecidas": [f"{o.time} en {o.location}" for o in opciones],
+            "texto_horario_ofrecido": lista_horarios,
+        }
         return BrainOutput(
             respuesta_propuesta=f"{intro}\n{lista_horarios}\n¿Cuál prefieres?",
             proxima_accion_propuesta="preguntar_dato_faltante",
@@ -1741,17 +1831,35 @@ class HealthBrain:
         texto es ambiguo entre dos horarios reales."""
         opciones = datos.get("opciones_horario", [])
         horas = datos.get("horas_ofrecidas", [])
+        # Recado 070 — `horas_display_ofrecidas` SIEMPRE trae el
+        # consultorio (a diferencia de `horas`, que puede tener valores
+        # REPETIDOS entre dos médicos distintos con la misma hora —
+        # hallazgo real contra hrmm-backend producción, nunca
+        # reproducible con el catálogo ficticio de los tests). Con
+        # `len(datos.get(...)) != len(horas)` como red de seguridad
+        # (estado viejo de antes de este recado, sin esta clave) cae al
+        # mismo `horas` bare de siempre — nunca un `IndexError`.
+        horas_display = datos.get("horas_display_ofrecidas") or horas
         elegida = self._elegir_opcion(texto, opciones)
         candidatos_ambiguos: List[str] = []
         if elegida is None and horas:
-            hora_elegida, candidatos_ambiguos = _emparejar_horario_por_texto(texto, horas)
+            hora_elegida, candidatos_ambiguos = _emparejar_horario_por_texto(texto, horas, horas_display)
             if hora_elegida is not None:
                 elegida = opciones[horas.index(hora_elegida)]
         verificacion_seleccion: Optional[VerificacionDeSeleccion] = None
-        if elegida is None and horas and not candidatos_ambiguos:
-            hora_id, verificacion_seleccion = self._interpretar_seleccion_asistida_por_llm(texto, horas)
-            if hora_id is not None:
-                elegida = opciones[horas.index(hora_id)]
+        if elegida is None and opciones and not candidatos_ambiguos:
+            # Recado 070 — hallazgo real de correctitud, no solo de
+            # presentación: antes se pasaba `horas` (bare, con posibles
+            # REPETIDOS) como `opciones_valores` — un `id` de selección
+            # duplicado rompe la premisa de `core.selection.interpret_selection`
+            # (el id debe identificar UNA opción real sin ambigüedad).
+            # Ahora se usa `opciones` (los `slot_id` reales, siempre
+            # ÚNICOS) como id, con `horas_display` como texto legible
+            # para el LLM — `elegida` queda DIRECTAMENTE el slot_id
+            # verificado, sin ningún `.index()` de por medio.
+            elegida, verificacion_seleccion = self._interpretar_seleccion_asistida_por_llm(
+                texto, opciones, lambda slot_id: horas_display[opciones.index(slot_id)]
+            )
         if elegida is None:
             nuevos = datos
             if candidatos_ambiguos:
@@ -1761,10 +1869,18 @@ class HealthBrain:
                 )
                 respuesta = variante.format(opciones=texto_candidatos)
             else:
+                # Recado 070 — se repite el texto YA renderizado de la
+                # oferta original (`texto_horario_ofrecido`, guardado en
+                # `_ofrecer_horarios`) en vez de reconstruir la lista
+                # desde `horas` bare — garantiza EXACTAMENTE la misma
+                # desambiguación (consultorio incluido cuando hace
+                # falta) que ya se le mostró al paciente, nunca una
+                # versión empobrecida.
+                texto_horas = datos.get("texto_horario_ofrecido") or _lista_numerada(horas_display)
                 variante, nuevos = _elegir_variante(
                     _VARIANTES_SELECCION_NO_IDENTIFICADA, datos, "intentos_aclaracion_seleccion"
                 )
-                respuesta = variante
+                respuesta = variante.format(opciones=texto_horas)
             return BrainOutput(
                 respuesta_propuesta=respuesta,
                 proxima_accion_propuesta="preguntar_dato_faltante",
@@ -1943,6 +2059,13 @@ class HealthBrain:
         lista_opciones = _lista_numerada(
             [f"{_formatear_fecha_humana(o.date)}, {o.time}, {o.location}" for o in opciones]
         )
+        # Recado 070 — se guarda el texto YA formateado de la lista (no
+        # solo los `slot_id`, que no traen fecha/hora/consultorio
+        # legibles) para poder repetirla fielmente si `_interpretar_
+        # seleccion_reprogramacion` necesita pedir aclaración más abajo
+        # — nunca "¿es la 1, la 2 o la 3?" sin volver a mostrar qué es
+        # cada una.
+        nuevos = {**nuevos, "texto_opciones_reprogramacion": lista_opciones}
         return BrainOutput(
             senales_detectadas=["reprogramacion_solicitada"],
             respuesta_propuesta=f"Claro que sí, aquí tienes otras opciones:\n{lista_opciones}\n¿Cuál te queda mejor?",
@@ -1955,8 +2078,9 @@ class HealthBrain:
         opciones = datos.get("opciones_reprogramacion", [])
         elegida = self._elegir_opcion(texto, opciones)
         if elegida is None:
+            texto_opciones = datos.get("texto_opciones_reprogramacion", "")
             return BrainOutput(
-                respuesta_propuesta="¿Me confirmas cuál opción prefieres — la 1, la 2 o la 3?",
+                respuesta_propuesta=f"No identifiqué cuál opción prefieres:\n{texto_opciones}\n¿me confirmas si es la 1, la 2 o la 3?",
                 proxima_accion_propuesta="preguntar_dato_faltante",
                 propuesta_de_actualizacion_de_estado={"datos_recopilados": datos},
             )

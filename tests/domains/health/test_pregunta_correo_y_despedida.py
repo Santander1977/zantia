@@ -206,23 +206,36 @@ def test_despedida_funciona_igual_con_llm_activo():
 #    repitiendo `_MENSAJE_INTENCION_NO_RECONOCIDA` indefinidamente.
 # ---------------------------------------------------------------------
 def test_reproduce_bucle_real_de_despedida_sin_conversacion_abierta():
+    """Recado 070 — desde que la despedida SIN conversación abierta
+    (`_resolver_por_intent`, rama `RequestIntent.SALIR`) también arma el
+    enfriamiento de 2 minutos (hallazgo real, ver ese commit), solo el
+    PRIMER mensaje de despedida de este bucle produce el texto de
+    cierre — los siguientes, todavía dentro del enfriamiento, deben
+    producir el mensaje de bloqueo (nunca el menú repetido, que era el
+    bug original de este test)."""
     gateway = build_health_gateway(
         MockActivitySource(), MockAppointmentService(), ReminderManager(), MockActivityResultSink()
     )
     ref = "PAC-BUCLE-058"
     handle_inbound_message(gateway, ref, "demo", "m1", "hola")
 
-    for texto in (
+    textos = (
         "No gracias q tengas buenas noches",
         "No ya terminé",
         "Chao",
         "No sé que hacer chao",
-    ):
+    )
+    for i, texto in enumerate(textos):
         respuesta = handle_inbound_message(gateway, ref, "demo", f"m-{hash(texto)}", texto)
         assert "no logré identificar" not in respuesta.lower(), (
             f"quedó atrapado en el loop del menú con: {texto!r} -> {respuesta!r}"
         )
-        assert "fue un gusto atenderte" in respuesta.lower()
+        if i == 0:
+            assert "fue un gusto atenderte" in respuesta.lower()
+        else:
+            assert "estamos en pausa" in respuesta.lower(), (
+                f"debía estar en enfriamiento tras la primera despedida: {texto!r} -> {respuesta!r}"
+            )
 
 
 # ---------------------------------------------------------------------
@@ -263,8 +276,20 @@ def test_mensaje_no_reconocido_incluye_la_opcion_de_salir():
 #    SIN conversación abierta), así que nadie liberaba esa marca —
 #    `patient_reference` seguía marcado como "ya se le mostró el saludo"
 #    desde el turno anterior, para siempre.
+#
+#    Recado 070 — actualizado: esta MISMA rama (SALIR sin conversación
+#    abierta) ahora TAMBIÉN arma el enfriamiento de 2 minutos (hallazgo
+#    real GRAVE, confirmado con una prueba en tiempo real: antes NUNCA
+#    lo armaba, así que el enfriamiento jamás se activaba para el camino
+#    de despedida más común de todos). Consecuencia correcta y
+#    esperada: un "Hola" INMEDIATO tras la despedida ya no muestra el
+#    guion completo — debe mostrar el mensaje de bloqueo del
+#    enfriamiento (requisito explícito del recado 069). Pasados los 2
+#    minutos, el requisito explícito del recado 069 (punto 4) es
+#    "saludo corto si aplica" — no el guion completo, que era la
+#    expectativa del recado 060 ANTES de que existiera el enfriamiento.
 # ---------------------------------------------------------------------
-def test_hola_despues_de_opcion_salir_muestra_saludo_institucional_completo():
+def test_hola_despues_de_opcion_salir_activa_el_enfriamiento_y_luego_saludo_corto():
     gateway = build_health_gateway(
         MockActivitySource(), MockAppointmentService(), ReminderManager(), MockActivityResultSink()
     )
@@ -275,11 +300,27 @@ def test_hola_despues_de_opcion_salir_muestra_saludo_institucional_completo():
     r2 = handle_inbound_message(gateway, ref, "demo", "m2", "5")
     assert "fue un gusto atenderte" in r2.lower()
     assert find_open_context(gateway, ref) is None
+    assert gateway._cierre_reciente[ref][2] is True  # es_despedida -> arma el enfriamiento
 
     r3 = handle_inbound_message(gateway, ref, "demo", "m3", "Hola")
     assert "no logré identificar" not in r3.lower(), (
         f"quedó atrapado en el error genérico tras la opción 5: {r3!r}"
     )
-    assert "1. reservar una cita" in r3.lower(), (
-        f"debía mostrar el saludo institucional completo (con menú), no la variante corta: {r3!r}"
+    assert "estamos en pausa" in r3.lower(), (
+        f"un 'Hola' INMEDIATO tras la despedida debía quedar bloqueado por el enfriamiento: {r3!r}"
     )
+
+    # Pasados los 2 minutos: contacto normal, saludo CORTO (recado 069,
+    # punto 4 — "no la variante completa", a diferencia de antes de que
+    # existiera el enfriamiento).
+    from datetime import timedelta
+
+    momento, nombre, es_desp = gateway._cierre_reciente[ref]
+    gateway._cierre_reciente[ref] = (momento - timedelta(minutes=3), nombre, es_desp)
+    r4 = handle_inbound_message(gateway, ref, "demo", "m4", "Hola")
+    assert "no logré identificar" not in r4.lower(), (
+        f"quedó atrapado en el error genérico pasado el enfriamiento: {r4!r}"
+    )
+    assert "estamos en pausa" not in r4.lower()
+    assert "1. reservar una cita" not in r4.lower(), f"debía ser el saludo CORTO, no el completo: {r4!r}"
+    assert "puedo ayudarte" in r4.lower()

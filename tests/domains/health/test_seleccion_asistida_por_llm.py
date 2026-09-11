@@ -141,7 +141,12 @@ def test_interpreta_horario_con_lenguaje_natural_el_lunes_que_mencionaste(servic
     salida = brain._interpretar_horario("la del medio", _datos_horario())
     assert salida.tool_requerida["params"]["slot_id"] == "SLOT-B"  # 10:30, la del medio
     assert salida.verificacion_de_seleccion is not None
-    assert salida.verificacion_de_seleccion.id_seleccionado_via_llm == "10:30"
+    # Recado 070 — hallazgo real contra hrmm-backend producción: dos
+    # horarios reales pueden compartir la MISMA hora en consultorios
+    # distintos, así que la hora bare ("10:30") ya no sirve como
+    # identificador único de la selección verificada — ahora se
+    # registra el `slot_id` real (siempre único), nunca ambiguo.
+    assert salida.verificacion_de_seleccion.id_seleccionado_via_llm == "SLOT-B"
 
 
 # ---------------------------------------------------------------------

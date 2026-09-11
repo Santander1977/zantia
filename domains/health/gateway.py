@@ -1021,12 +1021,32 @@ def _resolver_por_intent(
         # `_MENSAJE_INTENCION_NO_RECONOCIDA` (turno "ambiguo repetido"),
         # nunca al saludo institucional completo, porque
         # `patient_reference` seguía marcado desde antes de la despedida.
-        # Deliberadamente NO se toca `_cierre_reciente` acá (a diferencia
-        # de `_cerrar_si_definitivo`): esta despedida ya ES el saludo
-        # corto de cierre — el siguiente "Hola" debe volver a ver el
-        # guion institucional completo, no la variante corta de regreso.
         gateway._saludo_mostrado.discard(patient_reference)
-        return _texto_despedida(_nombre_conocido(gateway, patient_reference))
+        # Recado 070 — hallazgo real GRAVE, confirmado con una prueba en
+        # tiempo real (no simulada): esta es la rama que se alcanza para
+        # la INMENSA mayoría de despedidas reales ("gracias"/"chao"/"5"/
+        # "salir" SIN haber abierto antes una conversación — el caso más
+        # común de todos) — y hasta este recado, a propósito (comentario
+        # del recado 060, ver git blame), NUNCA tocaba
+        # `gateway._cierre_reciente`. Eso significa que el enfriamiento
+        # de 2 minutos (`_VENTANA_ENFRIAMIENTO`, recado 067,
+        # `handle_inbound_message`) — que se activa leyendo esa MISMA
+        # estructura — nunca se armaba para este camino: CUALQUIER
+        # mensaje inmediatamente después de esta despedida se procesaba
+        # como si nada hubiera pasado (el menú completo, o el fallback
+        # ambiguo), nunca el mensaje de bloqueo. El comentario del recado
+        # 060 (arriba) predata por completo el enfriamiento del 067 y
+        # nunca se revisó al agregarlo — un caso real de "2 mecanismos
+        # construidos en momentos distintos sobre la misma estructura,
+        # sin auditar la combinación". El requisito EXPLÍCITO del
+        # usuario en el recado 069 (punto 4: "pasados los 2 minutos...
+        # saludo CORTO si aplica") además SUPERA la decisión original del
+        # 060 (guion completo siempre) — un saludo corto tras el
+        # enfriamiento es ahora el comportamiento correcto, no una
+        # regresión.
+        nombre_conocido = _nombre_conocido(gateway, patient_reference)
+        gateway._cierre_reciente[patient_reference] = (datetime.now(timezone.utc), nombre_conocido, True)
+        return _texto_despedida(nombre_conocido)
 
     if intent == RequestIntent.INFORMACION_SERVICIO:
         return _resolver_consulta_catalogo(gateway, request, channel)
@@ -1652,6 +1672,9 @@ def _iniciar_verificacion_para_gestion(gateway: HealthGateway, request: PatientR
                 "Lamento decirte que por ahora no tengo otros horarios disponibles para reprogramar. "
                 "Escríbeme más tarde y lo revisamos de nuevo con gusto."
             )
+        lista_opciones = _lista_numerada(
+            [f"{_formatear_fecha_humana(o.date)}, {o.time}, {o.location}" for o in opciones]
+        )
         gateway._pending_verifications[request.patient_reference] = {
             "action": accion,
             "appointment_id": cita.appointment_id,
@@ -1660,10 +1683,13 @@ def _iniciar_verificacion_para_gestion(gateway: HealthGateway, request: PatientR
             "opciones_slot_id": [o.slot_id for o in opciones],
             "request_id": request.request_id,
             "service": cita.service,
+            # Recado 070 — texto YA formateado de la lista (los
+            # `slot_id` no traen fecha/hora/consultorio legibles),
+            # para poder repetirla fielmente si `_procesar_intento_de_codigo`
+            # necesita pedir aclaración más abajo — nunca "¿me confirmas
+            # 1, 2 o 3?" sin volver a mostrar qué es cada una.
+            "texto_opciones_slot": lista_opciones,
         }
-        lista_opciones = _lista_numerada(
-            [f"{_formatear_fecha_humana(o.date)}, {o.time}, {o.location}" for o in opciones]
-        )
         return f"Aquí tienes otras opciones:\n{lista_opciones}\n¿Cuál prefieres?"
 
     # Cancelar no necesita elegir nada — directo a enviar el código.
@@ -1870,7 +1896,8 @@ def _procesar_intento_de_codigo(gateway: HealthGateway, patient_reference: str, 
     if pendiente["stage"] == "esperando_seleccion":
         elegida = _elegir_opcion_ordinal(text, pendiente["opciones_slot_id"])
         if elegida is None:
-            return "No identifiqué cuál opción prefieres — ¿me confirmas 1, 2 o 3?"
+            texto_opciones = pendiente.get("texto_opciones_slot", "")
+            return f"No identifiqué cuál opción prefieres:\n{texto_opciones}\n¿me confirmas si es la 1, la 2 o la 3?"
         return _enviar_codigo_y_pausar(
             gateway, patient_reference, pendiente["action"], pendiente["appointment_id"],
             pendiente["documento_paciente"], pendiente["request_id"], new_slot_id=elegida,
