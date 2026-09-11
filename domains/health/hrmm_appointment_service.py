@@ -211,9 +211,29 @@ class HrmmAppointmentService:
 
         # Idempotencia adicional (sección "problema a resolver: idempotencia"):
         # antes de reservar, se verifica si ya existe una cita activa
-        # equivalente (mismo paciente/servicio/fecha) — crítico para el
-        # camino Activity, donde un reintento del sistema IPS podría
-        # disparar la misma gestión dos veces con una idempotency_key distinta.
+        # equivalente — crítico para el camino Activity, donde un
+        # reintento del sistema IPS podría disparar la misma gestión dos
+        # veces con una idempotency_key distinta.
+        #
+        # Recado 068 — hallazgo real GRAVE, confirmado leyendo este
+        # código tras una transcripción real: el chequeo comparaba SOLO
+        # `mismo_servicio` + `misma_fecha` (nunca la HORA/slot exacto).
+        # Un paciente que reservó Urgencias el 14 a las 07:30 en una
+        # conversación, y minutos después abrió una conversación NUEVA
+        # y genuinamente pidió Urgencias el 14 a las 07:00 (una franja
+        # DISTINTA, ofrecida y elegida explícitamente), nunca llegaba a
+        # reservarse de verdad — esta rama devolvía en silencio la cita
+        # VIEJA (07:30) como si fuera el resultado de la nueva selección,
+        # y el mensaje de confirmación mostraba una hora que el paciente
+        # NUNCA vio en la segunda oferta ("07:30" cuando la opción "1"
+        # de esa oferta era "07:00"). No crea un duplicado (por eso NO
+        # es un problema de citas repetidas en la base real), pero es
+        # igual de grave: el sistema afirmó haber reservado algo
+        # distinto a lo que realmente pasó. Corregido exigiendo también
+        # `misma_hora` — esto sigue evitando el reintento genuino que
+        # motivó el mecanismo (mismo slot exacto, dos idempotency_key
+        # distintas), pero ya NO intercepta una selección de horario
+        # legítimamente distinta el mismo día."""
         bloque = self._slots_crudos.get(slot_id)
         if bloque is not None:
             medico_del_slot = self._catalog.medico(bloque["medico_id"])
@@ -225,9 +245,10 @@ class HrmmAppointmentService:
                 existentes = self.get_patient_appointments(patient_reference)
                 for cita in existentes:
                     misma_fecha = cita.date == bloque["fecha"]
+                    misma_hora = cita.time == bloque["hora_inicio"]
                     mismo_servicio = cita.service == nombre_servicio_del_slot
                     esta_activa = cita.status in (AppointmentStatus.CONFIRMED, AppointmentStatus.RESCHEDULED)
-                    if esta_activa and misma_fecha and mismo_servicio:
+                    if esta_activa and misma_fecha and misma_hora and mismo_servicio:
                         return cita  # ya existe una equivalente — no se duplica
 
         contacto = self._contactos.get(patient_reference, {})

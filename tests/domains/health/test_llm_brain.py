@@ -252,6 +252,46 @@ def test_sin_health_brain_type_configurado_usa_determinista_por_default(services
 
 
 # ---------------------------------------------------------------------
+# 4bis. Recado 068 — hallazgo real GRAVE encontrado auditando: con
+#       HEALTH_BRAIN_TYPE=llm activo (confirmado que el `.env` real de
+#       esta máquina lo tiene así), la ventana de gracia de un turno
+#       (recado 050, gateway.py:_evaluar_ventana_de_gracia) llamaba
+#       `orchestrator.brain._detectar_interrupcion_de_contexto`
+#       directamente — un método que SOLO existe en `HealthBrain`, no
+#       en `HealthAnthropicBrain` (el envoltorio de redacción que
+#       reemplaza a `orchestrator.brain` con HEALTH_BRAIN_TYPE=llm) —
+#       CRASHEABA con AttributeError en cualquier mensaje que debiera
+#       reevaluarse tras un cierre, con el LLM activo.
+# ---------------------------------------------------------------------
+def test_ventana_de_gracia_no_crashea_con_health_brain_type_llm_activo(monkeypatch, services, activity_factory):
+    from domains.health.gateway import (
+        build_health_gateway, handle_inbound_message, _cerrar_si_definitivo, find_open_context,
+    )
+
+    monkeypatch.setenv("HEALTH_BRAIN_TYPE", "llm")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "clave-de-prueba-nunca-usada-en-red-real")
+    monkeypatch.setattr(
+        "domains.health.llm_brain.AnthropicResponseDrafter", lambda **kwargs: _DrafterQueParafrasea()
+    )
+
+    gateway = build_health_gateway(
+        services["source"], services["appointment_service"], services["reminder_manager"], services["result_sink"],
+    )
+    ref = "PAC-GRACIA-LLM"
+    handle_inbound_message(gateway, ref, "demo", "m1", "necesito una cita")
+    handle_inbound_message(gateway, ref, "demo", "m2", "1")
+    r_cierre = handle_inbound_message(gateway, ref, "demo", "m3", "1")
+    assert "confirmado" in r_cierre.lower()
+    assert find_open_context(gateway, ref) is None  # la Activity ya cerró de verdad
+
+    # Este mensaje, inmediatamente después del cierre, debe reevaluarse
+    # contra la ventana de gracia (recado 050) — antes del fix, esta
+    # llamada crasheaba con AttributeError en vez de responder.
+    r = handle_inbound_message(gateway, ref, "demo", "m4", "quiero hablar con alguien")
+    assert "equipo" in r.lower() or "persona" in r.lower()
+
+
+# ---------------------------------------------------------------------
 # 5. Prueba de integración REAL — DESHABILITADA por defecto (mismo
 #    patrón que ZANTIA_RUN_REAL_HRMM_TESTS, recado 009/025). Nunca se
 #    activa sola: requiere la variable Y el paquete `anthropic`

@@ -176,6 +176,108 @@ def test_book_appointment_no_duplica_cita_activa_equivalente(http, service):
     assert llamadas_post == []  # nunca se intentó crear una cita nueva
 
 
+def test_book_appointment_en_conversacion_nueva_con_otro_horario_no_reutiliza_la_vieja(monkeypatch):
+    """Recado 068 — hallazgo real GRAVE, confirmado leyendo el código:
+    la 'idempotencia adicional' de arriba comparaba SOLO servicio+fecha
+    (nunca la hora) — un paciente que reservó a las 07:30 en una
+    conversación, y minutos después, en una conversación NUEVA (otra
+    idempotency_key), pidió genuinamente Urgencias el mismo día pero a
+    las 07:00 (una franja DISTINTA, ofrecida y elegida explícitamente),
+    recibía en silencio la cita VIEJA (07:30) como si fuera el
+    resultado de la nueva selección — nunca se creaba una segunda cita
+    (no hay duplicado en la base real), pero el sistema afirmaba haber
+    reservado algo que no pasó. Reproduce el escenario completo con un
+    servicio HTTP con estado real (citas creadas se reflejan en
+    consultas posteriores), como en producción."""
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+
+    citas_creadas: list = []
+
+    def generador(method, path, params, json_body, headers):
+        if method == "GET" and path == "/api/agenda/servicios":
+            return HttpResponse(200, [{"servicio_id": "S1", "nombre": "Urgencias"}])
+        if method == "GET" and path == "/api/agenda/medicos":
+            return HttpResponse(200, [{"medico_id": "M1", "nombre_completo": "Dr. Prueba", "servicio_id": "S1", "consultorio": "Urgencias"}])
+        if method == "GET" and path == "/api/agenda/disponibilidad":
+            return HttpResponse(200, [
+                {"slot_id": "SLOT-0700", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-14", "hora_inicio": "07:00", "hora_fin": "07:30", "estado": "Libre"},
+                {"slot_id": "SLOT-0730", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-14", "hora_inicio": "07:30", "hora_fin": "08:00", "estado": "Libre"},
+            ])
+        if method == "GET" and path == "/api/agenda/citas":
+            return HttpResponse(200, list(citas_creadas))
+        if method == "POST" and path == "/api/agenda/citas":
+            nueva = {
+                "cita_id": f"C{len(citas_creadas) + 1}",
+                "slot_id": json_body["slot_id"],
+                "medico_id": "M1",
+                "servicio_id": "S1",
+                "fecha": "2026-09-14",
+                "hora_inicio": {"SLOT-0700": "07:00", "SLOT-0730": "07:30"}[json_body["slot_id"]],
+                "documento_paciente": json_body["documento_paciente"],
+                "nombre_paciente": json_body.get("nombre_paciente", ""),
+                "telefono": json_body.get("telefono", ""),
+                "estado": "reservada",
+                "created_at": "2026-09-11T21:37:00Z",
+                "updated_at": "2026-09-11T21:37:00Z",
+            }
+            citas_creadas.append(nueva)
+            return HttpResponse(201, nueva)
+        raise AssertionError(f"no programado en este test: {method} {path} {params}")
+
+    http = FakeHttpClient(generador=generador)
+    catalog = CatalogMirror()
+    catalog.sync(http)
+    service = HrmmAppointmentService(http, catalog)
+    service.get_availability("Urgencias")
+
+    # Conversación 1 (activity_id distinto -> idempotency_key distinta):
+    # el paciente elige la 2da opción (07:30 real, orden cronológico).
+    cita1 = service.book_appointment("SLOT-0730", "123456", "ACT-CONV-1:booking")
+    assert cita1.time == "07:30"
+
+    # Conversación 2, minutos después: el paciente elige la 1ra opción
+    # de una oferta NUEVA (07:00) — un slot genuinamente distinto.
+    cita2 = service.book_appointment("SLOT-0700", "123456", "ACT-CONV-2:booking")
+    assert cita2.time == "07:00", (
+        f"debía reservar el slot realmente elegido (07:00), no reutilizar la cita vieja: {cita2!r}"
+    )
+    assert cita2.appointment_id != cita1.appointment_id
+
+    llamadas_post = [c for c in http.llamadas if c["method"] == "POST" and c["path"] == "/api/agenda/citas"]
+    assert len(llamadas_post) == 2, "la segunda selección SÍ debía intentar reservar de verdad"
+
+
+def test_book_appointment_en_conversacion_nueva_con_el_mismo_horario_si_se_deduplica(monkeypatch):
+    """Control: el mecanismo de idempotencia adicional SIGUE
+    funcionando para su propósito original — mismo slot exacto, dos
+    idempotency_key distintas (ej. reintento real del sistema IPS)."""
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+
+    def generador(method, path, params, json_body, headers):
+        if method == "GET" and path == "/api/agenda/servicios":
+            return HttpResponse(200, [{"servicio_id": "S1", "nombre": "medicina general"}])
+        if method == "GET" and path == "/api/agenda/medicos":
+            return HttpResponse(200, [{"medico_id": "M1", "nombre_completo": "Dra. Ana Pérez", "servicio_id": "S1", "consultorio": "Consultorio 3"}])
+        if method == "GET" and path == "/api/agenda/disponibilidad":
+            return HttpResponse(200, [
+                {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Libre"},
+            ])
+        if method == "GET" and path == "/api/agenda/citas":
+            return HttpResponse(200, [_CITA_BASE])  # ya existe una activa, MISMO slot
+        raise AssertionError(f"no programado en este test: {method} {path} {params}")
+
+    http = FakeHttpClient(generador=generador)
+    catalog = CatalogMirror()
+    catalog.sync(http)
+    service = HrmmAppointmentService(http, catalog)
+    service.get_availability("medicina general")
+
+    cita = service.book_appointment("SLOT1", "123456", "idempotency-key-distinta-pero-mismo-slot")
+    assert cita.appointment_id == "C1"
+    llamadas_post = [c for c in http.llamadas if c["method"] == "POST" and c["path"] == "/api/agenda/citas"]
+    assert llamadas_post == []
+
+
 def test_cancel_appointment_directo_exige_verificacion(service):
     """El Protocol estándar `cancel_appointment(appointment_id)` no
     lleva documento/codigo — nunca ejecuta una cancelación real sin

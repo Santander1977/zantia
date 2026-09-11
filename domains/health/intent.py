@@ -125,19 +125,25 @@ def _tiene_senal_de_intencion(texto_sin_tildes: str) -> bool:
     )
 
 
-def classify_intent_or_none(text: str) -> Optional[RequestIntent]:
-    """Recado 048 — misma clasificación determinista por palabras clave
-    que `classify_intent`, pero distingue un caso adicional: un mensaje
-    que es ÚNICAMENTE un saludo ("hola"), sin ninguna otra palabra de
-    contenido, devuelve `None` en vez de caer en el default de
-    `PROGRAMAR_CITA`. Existe para que `gateway.py` pueda mostrar SOLO el
-    saludo institucional + menú en ese caso — antes, "hola" disparaba de
-    inmediato el flujo completo de reserva (creaba Activity, preguntaba
-    servicio) en el MISMO turno que el saludo, un hallazgo real de
-    producción. Cualquier otro mensaje ambiguo pero CON contenido (ej.
-    "Sí, claro, ayúdame" — recado 030) conserva el comportamiento de
-    siempre sin cambios: `classify_intent` sigue existiendo tal cual
-    para todo lo demás, ahora delega aquí."""
+def classify_intent_or_none_estricto(text: str) -> Optional[RequestIntent]:
+    """Recado 068 — extraída de `classify_intent_or_none` (abajo): TODA
+    la clasificación por frases/palabras clave específicas (segura, un
+    falso positivo requiere que el texto realmente contenga una de
+    estas frases), SIN el último recurso de `_tiene_senal_de_intencion`
+    (abajo) — ese último recurso es deliberadamente amplio ("necesito"/
+    "quiero"/"porfa"/etc. en cualquier parte del mensaje) y, por serlo,
+    puede ganarle a una clasificación MÁS precisa que todavía no se
+    intentó (ej. asistida por LLM, recado 052/064) si se prueba
+    primero — hallazgo real: "Kiero saber donde keda el ospital, porfa"
+    contiene "porfa" (`_VERBOS_DE_PEDIDO`) y `classify_intent_or_none`
+    completo la clasificaba como PROGRAMAR_CITA antes de que la
+    pregunta institucional (recado 066) tuviera oportunidad de
+    reconocerse, typo incluido, vía LLM. `gateway.py` prueba esta
+    versión ESTRICTA primero, luego sus propias categorías adicionales
+    (despedida/salir, información institucional — determinista y
+    asistida por LLM), y solo si NADA de eso coincide, recién ahí
+    prueba `classify_intent_or_none` completo (con el último recurso
+    incluido) antes de rendirse al fallback genérico."""
     texto = text.lower().strip()
 
     if any(k in texto for k in _REPROGRAMAR):
@@ -154,6 +160,26 @@ def classify_intent_or_none(text: str) -> Optional[RequestIntent]:
         return RequestIntent.INFORMACION_SERVICIO
     if any(k in texto for k in _PROGRAMAR):
         return RequestIntent.PROGRAMAR_CITA
+    return None
+
+
+def classify_intent_or_none(text: str) -> Optional[RequestIntent]:
+    """Recado 048 — misma clasificación determinista por palabras clave
+    que `classify_intent`, pero distingue un caso adicional: un mensaje
+    que es ÚNICAMENTE un saludo ("hola"), sin ninguna otra palabra de
+    contenido, devuelve `None` en vez de caer en el default de
+    `PROGRAMAR_CITA`. Existe para que `gateway.py` pueda mostrar SOLO el
+    saludo institucional + menú en ese caso — antes, "hola" disparaba de
+    inmediato el flujo completo de reserva (creaba Activity, preguntaba
+    servicio) en el MISMO turno que el saludo, un hallazgo real de
+    producción. Cualquier otro mensaje ambiguo pero CON contenido (ej.
+    "Sí, claro, ayúdame" — recado 030) conserva el comportamiento de
+    siempre sin cambios: `classify_intent` sigue existiendo tal cual
+    para todo lo demás, ahora delega aquí."""
+    resultado = classify_intent_or_none_estricto(text)
+    if resultado is not None:
+        return resultado
+    texto = text.lower().strip()
     sin_tildes = _sin_tildes(texto)
     if _es_solo_saludo(sin_tildes):
         return None

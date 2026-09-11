@@ -39,20 +39,25 @@ from .appointment_service import AppointmentService, AppointmentStatus
 from .brain import (
     _CONSULTA_CITAS_EXISTENTES,
     _EXPRESION_EMOCIONAL,
+    _PREGUNTA_CALIDAD_ATENCION,
+    _PREGUNTA_UBICACION_HOSPITAL,
     _contains_any_fuzzy,
+    _contains_any_sin_tildes,
     _es_despedida,
     _es_solicitud_de_salir,
     _formatear_fecha_humana,
     _indice_ordinal_seguro,
     _lista_numerada,
     _texto_despedida,
+    _texto_informacion_hospital,
 )
 from .confirmation import ConfirmationTracker
+from .institutional_info import INFORMACION_HOSPITAL
 from core.selection import SelectionOption, SelectionProposer, interpret_selection
 from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
 from .intent import _PROGRAMAR as _PALABRAS_PROGRAMAR_CITA
 from .intent import _sin_tildes as _sin_tildes_menu
-from .intent import classify_intent_or_none
+from .intent import classify_intent_or_none, classify_intent_or_none_estricto
 from .models import (
     Activity,
     ActivityStatus,
@@ -873,15 +878,49 @@ def _enrutar_solicitud_nueva(
     intent = _interpretar_opcion_menu(text)
     if intent is None and (_es_despedida(text.lower().strip()) or _es_solicitud_de_salir(text)):
         intent = RequestIntent.SALIR
+    # Recado 068 — hallazgo real: "¿dónde está el hospital?" (con typo)
+    # caía al fallback genérico de menú en vez de responder con los
+    # datos institucionales reales del recado 066 — esa categoría se
+    # conectó al detector centralizado DENTRO de una conversación
+    # abierta (`_detectar_interrupcion_de_contexto`), pero nunca a este
+    # fallback de menú (sin conversación abierta), el mismo hueco
+    # estructural que ya motivó los recados 062/063. Coincidencia
+    # EXACTA primero (gratis, sin red) — reutiliza las MISMAS listas de
+    # brain.py, nunca una copia paralela.
+    if intent is None and (
+        _contains_any_sin_tildes(text, _PREGUNTA_UBICACION_HOSPITAL)
+        or _contains_any_sin_tildes(text, _PREGUNTA_CALIDAD_ATENCION)
+    ):
+        return _texto_informacion_hospital(INFORMACION_HOSPITAL), False
     if intent is None:
-        intent = classify_intent_or_none(text)
+        # Recado 068 — hallazgo real ADICIONAL: la versión COMPLETA de
+        # `classify_intent_or_none` (con su último recurso amplio,
+        # `_tiene_senal_de_intencion` — "necesito"/"quiero"/"porfa"/etc.
+        # en cualquier parte del texto) le ganaba a la clasificación
+        # asistida por LLM de abajo, aunque fuera MENOS precisa —
+        # "Kiero saber donde keda el ospital, porfa" contiene "porfa" y
+        # se clasificaba como PROGRAMAR_CITA antes de que la pregunta
+        # institucional (con typo) tuviera oportunidad de reconocerse
+        # vía LLM. Se prueba primero la versión ESTRICTA (frases
+        # específicas seguras, sin el último recurso amplio) — el LLM
+        # (si hay proposer) tiene prioridad sobre ese último recurso
+        # amplio, nunca al revés.
+        intent = classify_intent_or_none_estricto(text)
     if intent is None:
         resultado_llm = _clasificar_solicitud_nueva_via_llm(text, gateway.selection_proposer)
-        if resultado_llm is None:
-            return None
         if resultado_llm == "emocional":
             return _respuesta_expresion_emocional_menu(), False
-        intent = resultado_llm
+        if resultado_llm == "informacion_institucional":
+            return _texto_informacion_hospital(INFORMACION_HOSPITAL), False
+        if resultado_llm is not None:
+            intent = resultado_llm
+        else:
+            # Último recurso de todos: la versión COMPLETA (con el
+            # fallback amplio) — mismo comportamiento final de siempre
+            # cuando ni el LLM ni nada más precise reconoció algo.
+            intent = classify_intent_or_none(text)
+            if intent is None:
+                return None
     respuesta = _resolver_por_intent(gateway, patient_reference, channel, message_id, text, intent)
     return respuesta, intent == RequestIntent.SALIR
 
@@ -897,6 +936,9 @@ _CATEGORIAS_MENU_LLM = {
     "4": "quiere consultar o ver las citas que ya tiene",
     "5": "quiere salir o terminar, no necesita nada más por ahora",
     "emocional": "expresa una emoción, malestar o frustración, sin pedir ninguna acción concreta de las anteriores",
+    # Recado 068 — pregunta sobre el hospital en sí (ubicación, teléfono,
+    # correo, calidad de atención), no sobre el trámite de una cita.
+    "informacion_institucional": "pregunta por la ubicación, dirección, teléfono, correo, o la calidad de atención del hospital en sí",
 }
 
 
@@ -907,17 +949,18 @@ def _clasificar_solicitud_nueva_via_llm(
     `_enrutar_solicitud_nueva` reconoció nada. Mismo mecanismo
     verificado de `core.selection.interpret_selection` — la propuesta
     del LLM SOLO se acepta si corresponde EXACTAMENTE a uno de los 5
-    ids reales de `_MENU_OPCIONES` (nunca inventa un intent nuevo) o a
-    `"emocional"`. Devuelve `None` si no hay proposer, si falló, o si
-    no hay coincidencia clara — comportamiento sin cambios en ese caso."""
+    ids reales de `_MENU_OPCIONES` (nunca inventa un intent nuevo), a
+    `"emocional"`, o a `"informacion_institucional"` (recado 068).
+    Devuelve `None` si no hay proposer, si falló, o si no hay
+    coincidencia clara — comportamiento sin cambios en ese caso."""
     if proposer is None:
         return None
     opciones = [SelectionOption(id=cid, text=desc) for cid, desc in _CATEGORIAS_MENU_LLM.items()]
     resultado = interpret_selection(texto, opciones, proposer)
     if resultado.option is None:
         return None
-    if resultado.option.id == "emocional":
-        return "emocional"
+    if resultado.option.id in ("emocional", "informacion_institucional"):
+        return resultado.option.id
     for ordinal, intent, _ in _MENU_OPCIONES:
         if ordinal == resultado.option.id:
             return intent
@@ -1309,7 +1352,22 @@ def _evaluar_ventana_de_gracia(
         return None
 
     texto = text.lower().strip()
-    interrupcion = contexto_cerrado.orchestrator.brain._detectar_interrupcion_de_contexto(  # noqa: SLF001 — mismo paquete, ver docstring
+    # Recado 068 — hallazgo real GRAVE, encontrado auditando: con
+    # `HEALTH_BRAIN_TYPE=llm` activo (recado 038), `orchestrator.brain`
+    # es un `HealthAnthropicBrain` (envoltorio de redacción), que NUNCA
+    # expone `_detectar_interrupcion_de_contexto` directamente — solo
+    # el `HealthBrain` determinista que envuelve internamente
+    # (`_brain_determinista`) lo tiene. Sin este fallback, la ventana
+    # de gracia completa (recado 050) CRASHEABA con `AttributeError` en
+    # cualquier despliegue con el LLM activo — confirmado con evidencia
+    # real: el `.env` de esta máquina tiene `HEALTH_BRAIN_TYPE=llm`
+    # configurado. `getattr` con el propio objeto como default cubre
+    # ambos casos (`HealthBrain` puro no tiene `_brain_determinista`,
+    # así que usa `self` — comportamiento sin cambios ahí).
+    brain_determinista = getattr(
+        contexto_cerrado.orchestrator.brain, "_brain_determinista", contexto_cerrado.orchestrator.brain
+    )
+    interrupcion = brain_determinista._detectar_interrupcion_de_contexto(  # noqa: SLF001 — mismo paquete, ver docstring
         texto, datos, etapa, estado.resultado_de_herramientas
     )
     if interrupcion is None:
