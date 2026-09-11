@@ -230,6 +230,51 @@ _MENU_OPCIONES: tuple = (
 )
 
 
+# Recado 073 — segunda capa de seguridad, ADEMÁS de reusar
+# `_indice_ordinal_seguro` (brain.py, recado 067). Al reproducir el
+# hallazgo real ("Y pasaron los 2 minutos" -> disparaba "2. Reprogramar")
+# confirmé que el límite de 8 palabras de esa función, por sí solo, NO
+# bastaba acá: "Y pasaron los 2 minutos" (5 palabras) y "mi hijo cumple
+# 4 años la otra semana" (7 palabras) siguen calzando dentro del límite
+# — el límite de 8 palabras fue calibrado para CONTESTAR una pregunta
+# de selección ya hecha ("¿cuál de estas 3 prefieres?"), un contexto
+# donde CUALQUIER mensaje corto se presume una respuesta a esa
+# pregunta. `_interpretar_opcion_menu` es distinta: interpreta el
+# PRIMER mensaje de una conversación, sin ninguna pregunta de selección
+# de por medio — un mensaje corto ahí NO implica que sea sobre el menú.
+# Por eso, para que un ordinal SUELTO cuente acá, además del límite de
+# 8 palabras, TODA otra palabra del mensaje (además del propio
+# ordinal) debe ser una de estas — mismo patrón ya establecido en este
+# archivo/proyecto para "_es_solo_despedida" (recado 069, brain.py):
+# exigir que el mensaje COMPLETO esté compuesto solo por relleno
+# reconocido, nunca solo acotar por longitud.
+_PALABRAS_FILLER_SELECCION_MENU = frozenset({
+    "opcion", "numero", "num", "la", "el", "los", "las", "una", "un",
+    "quiero", "quisiera", "elijo", "escojo", "prefiero", "dame", "es",
+    "por", "favor", "porfa", "porfavor", "esa", "ese", "esta", "este", "de",
+})
+# Claves reconocidas por `_indice_ordinal_seguro` que de verdad aplican
+# al menú (1-5) — usadas SOLO para la validación de "todo el mensaje es
+# relleno u ordinal" de abajo, nunca para el matching en sí (ese sigue
+# siendo 100% responsabilidad de `_indice_ordinal_seguro`).
+_ORDINALES_SUELTOS_MENU = frozenset(
+    {"1", "primera", "2", "segunda", "3", "tercera", "4", "cuarta", "5", "quinta"}
+)
+
+
+def _indice_menu_ordinal_seguro(texto_norm: str) -> Optional[int]:
+    """Envoltorio de `_indice_ordinal_seguro` (brain.py) con la
+    segunda capa de seguridad descrita arriba — ver ese comentario para
+    la causa raíz real que la motivó (recado 073)."""
+    indice = _indice_ordinal_seguro(texto_norm)
+    if indice is None:
+        return None
+    palabras = [p for p in re.split(r"\s+", texto_norm.strip()) if p]
+    if not all(p in _PALABRAS_FILLER_SELECCION_MENU or p in _ORDINALES_SUELTOS_MENU for p in palabras):
+        return None
+    return indice
+
+
 def _interpretar_opcion_menu(texto: str) -> Optional[RequestIntent]:
     """Acepta AMBAS formas de respuesta al menú numerado (requisito
     explícito): el ordinal exacto ("1"-"4") o cualquiera de las
@@ -238,18 +283,30 @@ def _interpretar_opcion_menu(texto: str) -> Optional[RequestIntent]:
     tildes, para el mismo tipo de error de tipeo real ya documentado en
     los recados 026/030). Devuelve `None` si no reconoce nada — quien
     llama debe volver a preguntar, nunca asumir una opción por
-    default."""
-    # Límite de palabra (`\b`) en TODOS los chequeos, no solo el
-    # ordinal — hallazgo real al migrar los tests existentes (recado
-    # 046): "programar" es substring literal de "reprogramar" ("re" +
-    # "programar"), así que un `in` simple habría matcheado SIEMPRE la
-    # opción 1 (reservar) para cualquier mensaje de reprogramar. `\b`
-    # exige un límite real de palabra en ambos lados, evitando este
-    # falso positivo sin perder el resto de la tolerancia ya construida
-    # (sin tildes, en cualquier parte del mensaje).
+    default.
+
+    Recado 073 — hallazgo real GRAVE de producción: un dígito suelto
+    del 1 al 5 dentro de una oración larga y completamente AJENA al
+    menú ("Y pasaron los 2 minutos", refiriéndose al enfriamiento) se
+    interpretaba como si el paciente hubiera elegido esa opción — con
+    una cita real ya reservada, esto disparó de verdad el wizard de
+    reprogramación (`_iniciar_verificacion_para_gestion`), ofreciendo
+    horarios reales que nadie pidió. Mismo patrón ya corregido en el
+    recado 067 para `_elegir_opcion`/`_elegir_opcion_ordinal` (selección
+    de una lista ya ofrecida) — pero ese fix nunca se extendió a esta
+    función. El ordinal (dígito O palabra: "1"/"primera"...
+    "5"/"quinta") ahora se revisa vía `_indice_menu_ordinal_seguro`
+    (arriba — reutiliza `_indice_ordinal_seguro`, MISMA función
+    compartida del recado 067, más la capa adicional de seguridad que
+    ese hallazgo hizo evidente que hacía falta acá). Las palabras/frases
+    clave (`palabras_clave`, ej. "reservar"/"cancelar") NO llevan este
+    límite — ya estaban protegidas por `\\b...\\b` desde el recado 046
+    (una palabra real de contenido, nunca un dígito de paso, es mucho
+    menos propensa a aparecer por coincidencia en un mensaje ajeno)."""
     texto_norm = _sin_tildes_menu(texto.strip().lower())
-    for ordinal, intent, palabras_clave in _MENU_OPCIONES:
-        if re.search(rf"\b{ordinal}\b", texto_norm):
+    indice_ordinal_seguro = _indice_menu_ordinal_seguro(texto_norm)
+    for posicion, (ordinal, intent, palabras_clave) in enumerate(_MENU_OPCIONES):
+        if indice_ordinal_seguro == posicion:
             return intent
         if any(
             re.search(rf"\b{re.escape(_sin_tildes_menu(palabra.lower()))}\b", texto_norm)
