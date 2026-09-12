@@ -832,7 +832,24 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
         es_primer_mensaje_del_wizard = patient_reference not in gateway._pending_identity
         respuesta_identificacion = _gestionar_identificacion(gateway, patient_reference, channel, text)
         if es_primer_mensaje_del_wizard:
-            return f"{_saludo_primer_contacto(None)} {respuesta_identificacion}"
+            # Recado 080 — separador `\n\n` (antes un espacio simple):
+            # son dos mensajes lógicos distintos (saludo institucional +
+            # menú, luego la pregunta de documento) que NINGÚN canal
+            # separa en 2 envíos reales — `handle_inbound_message`
+            # siempre devuelve un único string, y los 3 canales
+            # (Telegram/Chatwoot/Web) lo mandan tal cual en un solo
+            # mensaje/respuesta. Con un espacio simple, el final del
+            # menú numerado ("5. Salir / terminar") quedaba pegado al
+            # inicio de la siguiente frase ("¡Hola!..."), ilegible en
+            # cualquier canal — confirmado real con `WebChannel` (recado
+            # 080, prueba end-to-end vía `eis-chat-hrmm`), pero el mismo
+            # aplastamiento ya existía igual en Telegram/Chatwoot, sin
+            # que nadie lo hubiera notado antes. `\n\n` es un salto de
+            # párrafo que Telegram YA renderiza bien (el propio
+            # `_MENU_NUMERADO` de abajo usa `\n` simple entre opciones,
+            # dentro del mismo mensaje) — mejora visual para los 3
+            # canales, no una regresión para ninguno.
+            return f"{_saludo_primer_contacto(None)}\n\n{respuesta_identificacion}"
         return respuesta_identificacion
 
     # Recado 048 — hallazgo real de producción: un mensaje SIN ninguna
@@ -892,7 +909,12 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
     # criterio de "solo en el primer turno" que ya tenía el saludo
     # anterior — este punto solo se alcanza cuando no hay conversación
     # abierta todavía.
-    return f"{saludo_apertura} {respuesta}"
+    #
+    # Recado 080 — mismo separador `\n\n` que la rama de identificación
+    # de arriba, mismo motivo exacto: dos mensajes lógicos distintos
+    # (saludo/menú + primera respuesta real) que ningún canal separa en
+    # 2 envíos — un espacio simple los dejaba ilegibles pegados.
+    return f"{saludo_apertura}\n\n{respuesta}"
 
 
 def _enrutar_solicitud_nueva(
