@@ -1804,6 +1804,29 @@ def _iniciar_verificacion_para_gestion(gateway: HealthGateway, request: PatientR
     return _enviar_codigo_y_pausar(gateway, request.patient_reference, accion, cita.appointment_id, documento, request.request_id)
 
 
+_MENSAJE_ENVIO_FALLIDO_GENERICO = "No pude enviarte el código en este momento — intenta de nuevo en unos minutos."
+
+
+def _responder_tras_envio_de_codigo(resultado_envio: Dict[str, Any], mensaje_si_enviado: str) -> str:
+    """Recado 081 — hallazgo real de producción (documento 72302972,
+    conversación real vía `WebChannel`, 2026-09-11): hrmm-backend puede
+    responder HTTP 200 a `POST /api/agenda/verificacion/enviar` con
+    `{"enviado": false, "mensaje": "..."}` — nunca lanza un error HTTP
+    para este caso (confirmado con una llamada real: límite de tasa de
+    hrmm-backend, R-8, 3 envíos/300s, agotado por el volumen de pruebas
+    del día). Los 3 puntos que llaman `send_verification_code`
+    (`_enviar_codigo_y_pausar`, `_reenviar_codigo`,
+    `_iniciar_verificacion_de_identidad`) ignoraban ese campo y
+    confirmaban SIEMPRE "Listo, te enviamos un código..." — una promesa
+    falsa: el paciente creía tener un código en camino cuando
+    hrmm-backend nunca lo mandó. Ahora se usa el `mensaje` real que
+    hrmm-backend ya trae para este caso exacto, en vez de inventar uno
+    nuevo; solo si ni siquiera eso viene, se cae al genérico honesto."""
+    if resultado_envio.get("enviado", False):
+        return mensaje_si_enviado
+    return resultado_envio.get("mensaje") or _MENSAJE_ENVIO_FALLIDO_GENERICO
+
+
 def _enviar_codigo_y_pausar(
     gateway: HealthGateway, patient_reference: str, accion: str, appointment_id: str, documento: str, request_id: str,
     new_slot_id: Optional[str] = None,
@@ -1829,7 +1852,10 @@ def _enviar_codigo_y_pausar(
         "correo_parcial": correo_parcial,
     }
     pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
-    return f"Listo, te enviamos un código{pista} para confirmar. Escríbelo aquí para continuar cuando lo tengas."
+    return _responder_tras_envio_de_codigo(
+        resultado_envio,
+        f"Listo, te enviamos un código{pista} para confirmar. Escríbelo aquí para continuar cuando lo tengas.",
+    )
 
 
 # Recado 062/063 — hallazgo urgente de producción real: los wizards
@@ -1959,7 +1985,10 @@ def _reenviar_codigo(gateway: HealthGateway, pendiente: Dict[str, Any], document
     correo_parcial = resultado_envio.get("correo_parcial")
     pendiente["correo_parcial"] = correo_parcial
     pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
-    return f"Listo, te reenviamos un código nuevo{pista}. Escríbelo aquí cuando lo tengas."
+    return _responder_tras_envio_de_codigo(
+        resultado_envio,
+        f"Listo, te reenviamos un código nuevo{pista}. Escríbelo aquí cuando lo tengas.",
+    )
 
 
 def _respuesta_pregunta_correo_wizard(pendiente: Dict[str, Any]) -> str:
@@ -2319,7 +2348,10 @@ def _iniciar_verificacion_de_identidad(
         "correo_parcial": correo_parcial,
     }
     pista = f" a tu correo ({correo_parcial})" if correo_parcial else " a tu correo"
-    return f"Listo, te enviamos un código{pista} para confirmar tu identidad. Escríbelo aquí cuando lo tengas."
+    return _responder_tras_envio_de_codigo(
+        resultado_envio,
+        f"Listo, te enviamos un código{pista} para confirmar tu identidad. Escríbelo aquí cuando lo tengas.",
+    )
 
 
 def _procesar_codigo_de_identificacion(
