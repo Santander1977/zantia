@@ -80,7 +80,25 @@ class RealHttpClient:
         except urllib.error.HTTPError as exc:
             cuerpo_bruto = exc.read()
             status = exc.code
-        except urllib.error.URLError as exc:
+        except OSError as exc:
+            # Recado 082 — hallazgo real de producción: `urllib.request`
+            # solo envuelve en `URLError` los fallos de red ocurridos
+            # mientras se ENVÍA la solicitud (`AbstractHTTPHandler.do_open`
+            # solo captura `OSError` alrededor de `h.request(...)`) —
+            # un timeout ocurrido mientras se ESPERA/LEE la respuesta
+            # (`h.getresponse()`, fuera de ese `try`) se propaga como
+            # `socket.timeout`/`TimeoutError` CRUDO, sin envolver, y antes
+            # de este fix escapaba de aquí sin convertirse en `HttpError`
+            # — confirmado con un traceback real (hrmm-backend/n8n lentos
+            # tras un reinicio de n8n): el código nunca llegaba a
+            # `except AppointmentServiceError` en `gateway.py` (no es esa
+            # clase), y terminaba en el `except Exception` genérico de
+            # `service/app.py`, mostrando "Tuvimos un problema procesando
+            # tu mensaje" en vez de un mensaje honesto. `URLError` ya es
+            # subclase de `OSError`, así que capturar `OSError` aquí
+            # cubre ambos casos sin duplicar lógica — coincide además con
+            # lo que este mismo docstring de `HttpError` ya prometía
+            # ("no se pudo conectar, timeout, etc.") desde el día 1.
             raise HttpError(str(exc)) from exc
 
         cuerpo = None

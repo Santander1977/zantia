@@ -302,6 +302,29 @@ def test_send_verification_code(http, service):
     assert cabeceras["X-Backend-Secret"] == "secreto-de-prueba-no-real"
 
 
+def test_send_verification_code_convierte_fallo_de_transporte_en_appointment_service_error(service):
+    """Recado 082 — hallazgo real de producción (documento 72302972, tras
+    un reinicio de n8n): un timeout esperando la respuesta de
+    hrmm-backend se propagaba como `HttpError`, nunca capturado aquí —
+    `HttpError` NO es `AppointmentServiceError`, así que escapaba de los
+    3 `except AppointmentServiceError` de `gateway.py` y terminaba en el
+    `except Exception` genérico de `service/app.py` ("Tuvimos un
+    problema procesando tu mensaje" en vez del mensaje honesto que esos
+    3 sitios ya saben dar). Ahora se convierte aquí, sin necesitar red
+    real para reproducirlo — ver `test_hrmm_http.py` para el mismo
+    fallo reproducido con un socket real."""
+
+    def _generador_que_falla_de_transporte(method, path, params, json_body, headers):
+        from domains.health.hrmm_http import HttpError
+
+        raise HttpError("timeout esperando la respuesta (simulado)")
+
+    service._http.generador = _generador_que_falla_de_transporte
+
+    with pytest.raises(AppointmentServiceError):
+        service.send_verification_code("123456")
+
+
 def test_confirm_verification_code_valido(http, service):
     """Recado 014 — contrato PROPUESTO (ver docstring del módulo), no
     confirmado todavía contra hrmm-backend real."""

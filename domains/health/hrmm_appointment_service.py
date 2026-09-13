@@ -340,13 +340,33 @@ class HrmmAppointmentService:
     def send_verification_code(self, documento_paciente: str) -> Dict[str, Any]:
         """POST /api/agenda/verificacion/enviar — código de 6 dígitos
         por correo, TTL 10 min, 5 intentos, un solo uso (confirmado
-        leyendo app/recovery_codes.py)."""
-        respuesta = self._http.request(
-            "POST",
-            "/api/agenda/verificacion/enviar",
-            json_body={"documento_paciente": documento_paciente},
-            headers=self._headers_confianza(),
-        )
+        leyendo app/recovery_codes.py).
+
+        Recado 082 — hallazgo real de producción (documento 72302972,
+        justo después de un reinicio de n8n): un fallo de TRANSPORTE
+        (timeout esperando la respuesta de hrmm-backend, que a su vez
+        esperaba a un n8n recién reiniciado) se propagaba como
+        `HttpError` — nunca capturado en este archivo, y `HttpError` NO
+        es `AppointmentServiceError` — así que escapaba de los 3
+        `except AppointmentServiceError` de `gateway.py`
+        (`_enviar_codigo_y_pausar`/`_reenviar_codigo`/
+        `_iniciar_verificacion_de_identidad`) y terminaba en el
+        `except Exception` genérico de `service/app.py`, mostrando
+        "Tuvimos un problema procesando tu mensaje" en vez del mensaje
+        honesto que esos 3 sitios ya saben dar. Se convierte aquí a
+        `AppointmentServiceError` — mismo tipo que ya maneja con gracia
+        el caso de HTTP != 200 — para que ambas familias de fallo
+        (status de error, y fallo de transporte) terminen en la MISMA
+        respuesta honesta al paciente."""
+        try:
+            respuesta = self._http.request(
+                "POST",
+                "/api/agenda/verificacion/enviar",
+                json_body={"documento_paciente": documento_paciente},
+                headers=self._headers_confianza(),
+            )
+        except HttpError as exc:
+            raise AppointmentServiceError(f"verificacion/enviar: fallo de transporte ({exc})") from exc
         if respuesta.status != 200:
             raise AppointmentServiceError(f"verificacion/enviar respondió {respuesta.status}: {respuesta.body}")
         return respuesta.body  # {"enviado": bool, "mensaje": str, "correo_parcial": Optional[str]}
