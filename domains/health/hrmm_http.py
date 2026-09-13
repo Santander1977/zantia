@@ -47,9 +47,32 @@ class HttpClient(Protocol):
 
 class RealHttpClient:
     """Implementación real — stdlib `urllib`, sin dependencias nuevas.
-    No probada contra red real en esta sesión (ver recado)."""
+    No probada contra red real en esta sesión (ver recado).
 
-    def __init__(self, base_url: str, timeout_seconds: float = 10.0) -> None:
+    Recado 083 — `timeout_seconds` subido de 10s a 30s: hallazgo real
+    de producción, mismo día del recado 082 (timeout de transporte no
+    capturado hacia `verificacion/enviar`, ya corregido ahí). Con el
+    fix de captura ya desplegado, se confirmó que el timeout SIGUE
+    ocurriendo — reproducido localmente contra producción real, tardó
+    ~10.8s antes de fallar, justo en el límite anterior. `hrmm-backend`
+    (`app/api/agenda.py:enviar_codigo_verificacion`, otro repo, leído
+    en modo solo lectura) llama a SU PROPIO webhook de n8n con
+    `timeout=20` — es decir, hrmm-backend nunca debería tardar más de
+    ~20-22s en responder (éxito o su propio `enviado: false`) para este
+    endpoint específico, aun si n8n está lento tras un reinicio (el
+    usuario reportó hasta 60s en casos puntuales del Task Runner, pero
+    el propio timeout interno de hrmm-backend ya lo acota a 20s antes
+    de llegar a eso). 30s deja margen sobre ese máximo conocido de
+    hrmm-backend sin ser un límite arbitrario ni tan largo como para
+    ocultar un fallo real de red — sigue siendo un único valor
+    compartido por TODAS las llamadas de este cliente (catálogo,
+    disponibilidad, reservas, verificación), decisión deliberada: el
+    resto de esas llamadas no dependen de n8n y responden rápido de
+    por sí, así que un techo más alto no las hace más lentas en el
+    caso normal, solo evita cortar de más una respuesta lenta pero
+    válida en el caso raro."""
+
+    def __init__(self, base_url: str, timeout_seconds: float = 30.0) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
 

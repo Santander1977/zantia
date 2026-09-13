@@ -57,6 +57,17 @@ def test_timeout_esperando_la_respuesta_se_convierte_en_http_error():
         cliente.request("GET", "/cualquier-ruta")
 
 
+def test_timeout_por_defecto_es_30_segundos():
+    """Recado 083 — decisión deliberada (documentada en el docstring de
+    `RealHttpClient`): 10s resultó insuficiente en producción real (el
+    propio `hrmm-backend` puede tardar hasta ~20-22s en este endpoint
+    específico por depender de su propio n8n). Este test fija el valor
+    como decisión de producto, no como detalle de implementación — si
+    alguien lo baja sin querer, esto debe fallar."""
+    cliente = RealHttpClient(base_url="http://127.0.0.1:1")
+    assert cliente._timeout == 30.0
+
+
 def test_conexion_rechazada_tambien_se_convierte_en_http_error():
     """Control: un puerto cerrado (nadie escuchando) es otro tipo de
     OSError (`ConnectionRefusedError`) distinto del timeout de arriba —
