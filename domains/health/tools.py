@@ -52,8 +52,17 @@ class BookAppointmentTool:
             raise ToolError("book_appointment requiere 'idempotency_key'")
         slot_id = params.get("slot_id")
         patient_reference = params.get("patient_reference")
+        # Recado 085/R-21 — sin esto, `HrmmAppointmentService.book_appointment`
+        # nunca recibía un correo real (su único otro origen,
+        # `contacto.get("correo")`, está estructuralmente siempre vacío —
+        # `register_patient_contact` nunca se llama desde ningún camino
+        # real, ver docstring de `correo_conocido`) y el correo de
+        # confirmación NUNCA se disparaba para ninguna reserva hecha por
+        # chat. `.get("correo")` (nunca falla si el llamador no lo manda
+        # — MockAppointmentService/tests existentes sin tocar).
+        correo = params.get("correo")
         try:
-            reservada = self._service.book_appointment(slot_id, patient_reference, idempotency_key)
+            reservada = self._service.book_appointment(slot_id, patient_reference, idempotency_key, correo=correo)
         except AppointmentServiceError as exc:
             return ToolResult(success=False, error=str(exc))
         try:

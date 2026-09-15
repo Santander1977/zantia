@@ -124,6 +124,16 @@ def test_interpretar_opcion_menu_acepta_numero_o_palabra(texto, intent_esperado)
     assert _interpretar_opcion_menu(texto) == intent_esperado
 
 
+# Recado 084 — "consultame las citas del ultimo mes" NO calza con la
+# palabra suelta "consultar" de `_interpretar_opcion_menu` (límite de
+# palabra completa, "consultame" es una palabra distinta) — se
+# clasifica en la capa siguiente, `classify_intent_or_none_estricto`
+# (ver `test_recado084_...` en `corpus_regresion/` para la cobertura
+# extremo a extremo).
+def test_interpretar_opcion_menu_no_reconoce_consultame_variante_conjugada():
+    assert _interpretar_opcion_menu("consultame las citas del ultimo mes") is None
+
+
 def test_interpretar_opcion_menu_no_reconocido_devuelve_none():
     assert _interpretar_opcion_menu("no sé, tal vez") is None
 
@@ -172,6 +182,12 @@ def _gateway_hrmm_sin_identidad(monkeypatch):
             return HttpResponse(200, {"nombre_paciente": "Paciente Nuevo", "telefono": "3000000000"})
         if method == "POST" and path == "/api/agenda/verificacion/enviar":
             return HttpResponse(200, {"enviado": True, "mensaje": "Código enviado.", "correo_parcial": "p***@x.com"})
+        # Recado 085/R-21 — `_iniciar_verificacion_de_identidad` ahora
+        # también consulta `correo_conocido` (GET /api/agenda/citas) tras
+        # enviar el código, para poder disparar el correo de confirmación
+        # real más adelante (ver `HrmmAppointmentService.correo_conocido`).
+        if method == "GET" and path == "/api/agenda/citas":
+            return HttpResponse(200, [])
         raise AssertionError(f"no programado en este test: {method} {path}")
 
     http = FakeHttpClient(generador=generador)

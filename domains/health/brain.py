@@ -203,6 +203,17 @@ _CONSULTA_CITAS_EXISTENTES = (
     # ninguna variante existente la cubría ni siquiera sin errores de
     # tipeo.
     "cuales tengo reservadas", "qué tengo reservado", "que tengo reservado",
+    # Recado 084 — mismo hallazgo que `intent.py:_CONSULTAR` (deliberadamente
+    # duplicado entre capas, ver docstring de esa lista): "consultame las
+    # citas del último mes" usa pronombre enclítico ("consultame") y
+    # artículo sin posesivo ("las citas"), formas que ninguna frase
+    # anterior cubría.
+    "consultame las citas", "consultame mis citas", "consultar las citas",
+    # Recado 085 — mismo hallazgo que `intent.py:_CONSULTAR` (misma
+    # transcripción real, turno siguiente): "consultas las citas mias
+    # del ultimo mes" — forma conjugada "consultas" + posesivo DESPUÉS
+    # del sustantivo ("citas mias", no "mis citas").
+    "consultas las citas mias", "las citas mias",
 )
 # Recado 058 — hallazgo real de producción: tras una reserva exitosa
 # ("...Te enviamos un correo de confirmación con todos los detalles."),
@@ -213,12 +224,32 @@ _CONSULTA_CITAS_EXISTENTES = (
 # pidiera. Incluye la variante real "enviastes" (typo coloquial común
 # en español, sin conjugación correcta) además de la forma correcta
 # "enviaste" — mismo criterio de palabras clave del resto del archivo.
+#
+# Recado 084 — hallazgo real ADICIONAL de la misma investigación: "ok
+# enviame un email" (mismo momento exacto, justo tras confirmar una
+# reserva) NO coincidía con ninguna frase de arriba — todas están
+# fraseadas como pregunta sobre algo YA hecho ("¿me enviaste...?",
+# "¿llegó...?"), nunca como una ORDEN/pedido de que se envíe ahora
+# ("enviame", forma imperativa con pronombre enclítico). El sistema no
+# puede "enviar" un correo bajo demanda — `book_appointment` es el
+# único punto donde el envío real ocurre (ver docstring de abajo) — así
+# que la respuesta correcta a un pedido de envío es la MISMA respuesta
+# honesta sobre el estado real (`respuesta_pregunta_sobre_correo`): si
+# ya se envió, se lo confirma; si no, se lo dice sin prometer un reenvío
+# que el sistema no sabe hacer. Se trata como la MISMA categoría — un
+# pedido de envío, justo tras una acción reciente, es funcionalmente la
+# misma pregunta ("¿tengo o no el correo?") con otra gramática.
 _PREGUNTA_SOBRE_CORREO_ENVIADO = (
     "me enviaste el correo", "me enviastes el correo", "me enviaste el email", "me enviastes el email",
     "enviaste el correo", "enviastes el correo", "enviaste el email", "enviastes el email",
     "llego el correo", "llego el email", "me llego el correo", "me llego el email", "me llego el mail",
     "recibi el correo", "recibi el email",
     "confirmame si me enviaste", "confirmame si me enviastes", "confirmame si me llego",
+    "enviame el correo", "enviame un correo", "enviame el email", "enviame un email",
+    "mandame el correo", "mandame un correo", "mandame el email", "mandame un email",
+    "reenviame el correo", "reenviame el email",
+    "puedes enviarme el correo", "puedes enviarme el email",
+    "puedes mandarme el correo", "puedes mandarme el email",
 )
 # Recado 058 — hallazgo real de producción: "no gracias ya termine"
 # (una despedida real y clara) se interpretó como un intento de nombrar
@@ -1898,6 +1929,14 @@ class HealthBrain:
         # `agent.py` concatena a continuación (evita sobreusarlo).
         nombre = (self._activity.patient_contact or {}).get("nombre")
         apertura = f"¡Perfecto, {nombre}!" if nombre else "¡Perfecto!"
+        # Recado 085/R-21 — correo REAL del titular verificado (nunca
+        # del beneficiario, que no pasa por verificación de identidad
+        # propia — ver `patient_reference_reserva` arriba: el correo de
+        # confirmación siempre va a quien demostró ser dueño del canal,
+        # sea o no la persona citada) — sin esto, `book_appointment`
+        # nunca tenía forma de disparar el correo de confirmación real
+        # (causa raíz completa: `HrmmAppointmentService.correo_conocido`).
+        correo = (self._activity.patient_contact or {}).get("correo")
         return BrainOutput(
             respuesta_propuesta=f"{apertura} Dame un segundo, voy a dejarlo reservado.",
             proxima_accion_propuesta="ejecutar_tool",
@@ -1907,6 +1946,7 @@ class HealthBrain:
                     "slot_id": elegida,
                     "patient_reference": patient_reference_reserva,
                     "idempotency_key": f"{self._activity.activity_id}:booking",
+                    "correo": correo,
                 },
             },
             # Recado 037, Parte 3: confirmación determinista ya ocurrió

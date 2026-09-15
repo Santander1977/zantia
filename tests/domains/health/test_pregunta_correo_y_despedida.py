@@ -95,6 +95,11 @@ def test_varias_formas_de_despedida_cierran_la_conversacion(texto):
         "me enviaste el correo?",
         "ya me llego el correo",
         "recibi el email?",
+        # Recado 084 — forma de PEDIDO ("enviame", imperativo con
+        # pronombre enclítico), no de pregunta sobre algo ya hecho.
+        "ok enviame un email",
+        "enviame el correo",
+        "mandame el correo por favor",
     ],
 )
 def test_pregunta_sobre_correo_responde_con_honestidad(texto):

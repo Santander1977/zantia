@@ -14,6 +14,17 @@ from domains.health.hrmm_appointment_service import HrmmAppointmentService, Veri
 from domains.health.hrmm_catalog import CatalogMirror
 from domains.health.hrmm_http import FakeHttpClient, HttpResponse
 
+# Capturado a nivel de módulo (ANTES de que corra cualquier fixture,
+# incluida la autouse `_secreto_de_prueba` de abajo, que sobrescribe
+# `HRMM_BACKEND_SECRET` con un valor falso para TODOS los tests de este
+# archivo) — únicamente para que el test real gateado más abajo
+# (`test_book_appointment_persiste_el_correo_real_contra_hrmm_backend_real`)
+# pueda restaurar el secreto REAL del `.env` dentro de su propio scope,
+# necesario porque ese test SÍ llama endpoints trusted reales
+# (`GET`/`PATCH /api/agenda/citas`) — a diferencia de los otros 2 tests
+# reales de este archivo, que solo usan endpoints públicos.
+_HRMM_BACKEND_SECRET_REAL = os.environ.get("HRMM_BACKEND_SECRET")
+
 _CITA_BASE = {
     "cita_id": "C1",
     "slot_id": "SLOT1",
@@ -138,6 +149,61 @@ def test_book_appointment_exitoso(http, service):
 
     assert cita.appointment_id == "C1"
     assert cita.service == "medicina general"  # nombre legible, no el servicio_id crudo
+
+
+# ---------------------------------------------------------------------
+# Recado 085/R-21 — el correo real de confirmación NUNCA se disparaba
+# para una reserva hecha por chat: `buscar_paciente` (único dato de
+# contacto que el wizard de identidad consultaba) no expone `correo`
+# (`PacienteBuscado`, confirmado leyendo el schema real de hrmm-backend
+# — solo nombre_paciente/telefono, por privacidad). `correo_conocido`
+# replica, del lado de ZANTIA, la MISMA técnica que hrmm-backend usa
+# internamente para `enviar_codigo_verificacion` (buscar un correo entre
+# las citas YA existentes del documento) — sobre el MISMO endpoint
+# trusted (`GET /api/agenda/citas`) que `get_patient_appointments` ya
+# usa, así que no hace falta ningún cambio del lado de hrmm-backend.
+# ---------------------------------------------------------------------
+def test_correo_conocido_encuentra_el_correo_de_una_cita_previa(http, service, monkeypatch):
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+    http.programar("GET", "/api/agenda/citas", HttpResponse(200, [
+        {**_CITA_BASE, "cita_id": "C1", "correo": None},
+        {**_CITA_BASE, "cita_id": "C2", "correo": "real@example.com"},
+    ]))
+    assert service.correo_conocido("123456") == "real@example.com"
+
+
+def test_correo_conocido_devuelve_none_sin_ninguna_cita_previa(http, service, monkeypatch):
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+    http.programar("GET", "/api/agenda/citas", HttpResponse(200, []))
+    assert service.correo_conocido("123456") is None
+
+
+def test_correo_conocido_devuelve_none_si_hrmm_backend_falla(http, service, monkeypatch):
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", "secreto-de-prueba-no-real")
+    http.programar("GET", "/api/agenda/citas", HttpResponse(500, {"detail": "error"}))
+    # Best-effort — nunca rompe el flujo de identificación por esto.
+    assert service.correo_conocido("123456") is None
+
+
+def test_book_appointment_incluye_correo_en_el_payload_de_creacion(http, service):
+    """El correo real (recado 085) ahora viaja en el body de creación
+    (`CitaCreate.correo`, campo real que hrmm-backend SÍ persiste en la
+    cita) — antes SIEMPRE se omitía, así que la cita quedaba con
+    `correo: null` en la base real incluso cuando la confirmación se
+    lograba enviar después."""
+    http.programar("GET", "/api/agenda/disponibilidad", HttpResponse(200, [
+        {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-10", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Libre"}
+    ]))
+    http.programar("GET", "/api/agenda/citas", HttpResponse(200, []))
+    http.programar("POST", "/api/agenda/citas", HttpResponse(201, {**_CITA_BASE, "correo": "real@example.com"}))
+    http.programar("POST", "/api/agenda/citas/C1/enviar-confirmacion", HttpResponse(200, {"exito": True, "estado": "enviado", "mensaje": "ok"}))
+
+    service.get_availability("medicina general")
+    cita = service.book_appointment("SLOT1", "123456", "idem-correo", correo="real@example.com")
+
+    llamada_creacion = next(c for c in http.llamadas if c["method"] == "POST" and c["path"] == "/api/agenda/citas")
+    assert llamada_creacion["json_body"]["correo"] == "real@example.com"
+    assert cita.correo_confirmacion_enviado is True
 
 
 def test_book_appointment_idempotente_por_clave(http, service):
@@ -405,6 +471,86 @@ def test_get_availability_contra_hrmm_backend_real():
     slots = service_real.get_availability(servicio_real)
     for slot in slots:
         assert slot.slot_id and slot.date and slot.time
+
+
+# ---------------------------------------------------------------------
+# Recado 085/R-21 — confirma, contra hrmm-backend REAL, que una cita
+# creada vía `book_appointment(..., correo=...)` (el mismo método que
+# ahora usa el flujo real de chat, ver `tools.py:BookAppointmentTool`)
+# queda con el campo `correo` REALMENTE poblado en la base — a
+# diferencia de `CITA-2cb295f690` (reserva real del hallazgo original,
+# `correo: null`). A diferencia de `test_enviar_confirmacion_email_
+# contra_hrmm_backend_real` (abajo, interactiva — verifica la ENTREGA
+# real del correo, que exige un humano revisando un inbox en vivo), este
+# test verifica solo el PAYLOAD persistido — totalmente automático, sin
+# `input()`: la limpieza usa `PATCH /citas/{id}` (trusted, mismo secreto
+# ya usado para crear la cita) para cancelar directamente, sin pasar por
+# el sub-flujo de código de verificación que exige `cancel_appointment_
+# verified` (ese es para acciones INICIADAS POR EL PACIENTE vía chat —
+# una limpieza de datos de prueba propios no lo necesita).
+# ---------------------------------------------------------------------
+@pytest.mark.skipif(
+    os.environ.get("ZANTIA_RUN_REAL_HRMM_TESTS") != "1",
+    reason="Prueba de red real contra hrmm-backend deshabilitada por defecto — ver recado 085.",
+)
+def test_book_appointment_persiste_el_correo_real_contra_hrmm_backend_real(monkeypatch):
+    import time
+
+    from domains.health.hrmm_http import RealHttpClient
+
+    if not _HRMM_BACKEND_SECRET_REAL:
+        pytest.skip("HRMM_BACKEND_SECRET real no disponible en el entorno de este proceso.")
+    # Restaura el secreto REAL — la fixture autouse `_secreto_de_prueba`
+    # ya lo sobrescribió con un valor falso para este test también.
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", _HRMM_BACKEND_SECRET_REAL)
+
+    base_url = os.environ["HRMM_BACKEND_URL"]
+    secreto = _HRMM_BACKEND_SECRET_REAL
+    http_real = RealHttpClient(base_url)
+    catalog_real = CatalogMirror()
+    catalog_real.sync(http_real)
+    servicio_real = next(iter(catalog_real._servicios.values())).nombre
+    service_real = HrmmAppointmentService(http_real, catalog_real)
+
+    documento = f"ZANTIA-TEST-085-{int(time.time())}"
+    telefono = f"5730002{int(time.time()) % 10000:04d}"
+    correo_prueba = f"zantia-test-085-{int(time.time())}@example.com"
+
+    opciones = service_real.get_availability(servicio_real)
+    assert opciones, "Sin disponibilidad real para el servicio elegido — no se puede montar la prueba."
+    slot = opciones[0]
+
+    service_real.register_patient_contact(documento, "ZANTIA TEST 085", telefono)
+    cita_id = None
+    try:
+        cita = service_real.book_appointment(slot.slot_id, documento, f"zantia-test-085:{documento}", correo=correo_prueba)
+        cita_id = cita.appointment_id
+
+        # Relectura CRUDA (no vía `get_appointment`/`Appointment`, que
+        # descarta `correo` — el mismo campo que este test verifica)
+        # para confirmar lo que hrmm-backend REALMENTE persistió.
+        respuesta_cruda = http_real.request(
+            "GET", f"/api/agenda/citas/{cita_id}", headers={"X-Backend-Secret": secreto},
+        )
+        assert respuesta_cruda.status == 200, respuesta_cruda.body
+        assert respuesta_cruda.body.get("correo") == correo_prueba, (
+            f"la cita real {cita_id} quedó con correo={respuesta_cruda.body.get('correo')!r} "
+            f"en vez de {correo_prueba!r} — mismo síntoma que CITA-2cb295f690"
+        )
+        # El segundo paso (envío real) también debió intentarse con el
+        # mismo correo — best-effort, `True` si hrmm-backend confirmó.
+        assert cita.correo_confirmacion_enviado is True, cita
+    finally:
+        if cita_id is not None:
+            respuesta_cancelacion = http_real.request(
+                "PATCH", f"/api/agenda/citas/{cita_id}",
+                json_body={"estado": "cancelada", "canal": "zantia-test-085-cleanup"},
+                headers={"X-Backend-Secret": secreto},
+            )
+            assert respuesta_cancelacion.status == 200, (
+                f"LIMPIEZA FALLIDA — cita de prueba {cita_id} (documento {documento}) "
+                f"quedó activa en hrmm-backend real: {respuesta_cancelacion.body!r}"
+            )
 
 
 # ---------------------------------------------------------------------

@@ -93,6 +93,16 @@ class IdentidadCanal:
     # defensiva en `SQLiteIdentidadCanalStore._init_schema`), y
     # `buscar_paciente` podría no traer nombre para algún paciente real.
     nombre: Optional[str] = None
+    # Correo real del paciente (recado 085/R-21) — MISMO criterio y
+    # MISMO momento de captura que `nombre` (una sola vez, en
+    # `marcar_verificado`), pero viene de `HrmmAppointmentService.
+    # correo_conocido` (GET /api/agenda/citas, trusted), nunca de
+    # `buscar_paciente` (que no lo expone — ver docstring de
+    # `correo_conocido`). Se persiste acá para que `book_appointment`
+    # pueda enviar el correo de confirmación real sin volver a
+    # consultarlo en cada reserva — mismo razonamiento que ya
+    # justificaba guardar `nombre`.
+    correo: Optional[str] = None
 
     def vigente(self, ahora: Optional[datetime] = None) -> bool:
         """VERIFICADO y dentro de la ventana de retención
@@ -116,7 +126,9 @@ class IdentidadCanalStore(Protocol):
         confiable todavía (ver `marcar_verificado`)."""
         ...
 
-    def marcar_verificado(self, telefono: str, documento: str, nombre: Optional[str] = None) -> IdentidadCanal:
+    def marcar_verificado(
+        self, telefono: str, documento: str, nombre: Optional[str] = None, correo: Optional[str] = None
+    ) -> IdentidadCanal:
         """Único punto que escribe estado=VERIFICADO — se llama tras un
         código de verificación válido, tanto en el primer registro
         (`domains/health/gateway.py:_procesar_codigo_de_identificacion`)
@@ -124,7 +136,9 @@ class IdentidadCanalStore(Protocol):
         requisito #1.4: UPSERT — actualiza `verificado_en`, nunca crea
         una fila duplicada, la `telefono` sigue siendo la llave primaria).
         `nombre` (recado 034) se guarda aquí, una sola vez — nunca se
-        vuelve a consultar `buscar_paciente` solo para saludar."""
+        vuelve a consultar `buscar_paciente` solo para saludar. `correo`
+        (recado 085) mismo criterio, una sola vez — nunca se vuelve a
+        consultar `correo_conocido` solo para reservar."""
         ...
 
     def eliminar(self, telefono: str) -> None:
@@ -164,22 +178,25 @@ class SQLiteIdentidadCanalStore:
                 documento TEXT NOT NULL,
                 estado TEXT NOT NULL,
                 verificado_en TEXT,
-                nombre TEXT
+                nombre TEXT,
+                correo TEXT
             )
             """
         )
         self._conn.commit()
-        self._migrar_columna_nombre_si_falta()
+        self._migrar_columna_si_falta("nombre")
+        self._migrar_columna_si_falta("correo")
 
-    def _migrar_columna_nombre_si_falta(self) -> None:
-        """Migración defensiva (recado 034): una tabla `identidad_canal`
-        creada ANTES de este recado no tiene la columna `nombre` —
-        `CREATE TABLE IF NOT EXISTS` no altera una tabla que ya existe.
-        `ALTER TABLE ADD COLUMN` falla con "duplicate column" cuando la
-        tabla es nueva (ya la trae del CREATE de arriba) — se ignora
-        SOLO ese error puntual, cualquier otro se propaga."""
+    def _migrar_columna_si_falta(self, columna: str) -> None:
+        """Migración defensiva (recado 034, extendida en el 085 para
+        `correo`): una tabla `identidad_canal` creada ANTES de que esta
+        columna existiera no la tiene — `CREATE TABLE IF NOT EXISTS` no
+        altera una tabla que ya existe. `ALTER TABLE ADD COLUMN` falla
+        con "duplicate column" cuando la tabla es nueva (ya la trae del
+        CREATE de arriba) — se ignora SOLO ese error puntual, cualquier
+        otro se propaga."""
         try:
-            self._conn.execute("ALTER TABLE identidad_canal ADD COLUMN nombre TEXT")
+            self._conn.execute(f"ALTER TABLE identidad_canal ADD COLUMN {columna} TEXT")
             self._conn.commit()
         except sqlite3.OperationalError as exc:
             if "duplicate column" not in str(exc).lower():
@@ -187,7 +204,7 @@ class SQLiteIdentidadCanalStore:
 
     def get(self, telefono: str) -> Optional[IdentidadCanal]:
         cur = self._conn.execute(
-            "SELECT telefono, documento, estado, verificado_en, nombre FROM identidad_canal WHERE telefono = ?",
+            "SELECT telefono, documento, estado, verificado_en, nombre, correo FROM identidad_canal WHERE telefono = ?",
             (telefono,),
         )
         fila = cur.fetchone()
@@ -211,23 +228,26 @@ class SQLiteIdentidadCanalStore:
             self._conn.commit()
         return IdentidadCanal(telefono, documento, EstadoIdentidadCanal.PENDIENTE_VERIFICACION, None)
 
-    def marcar_verificado(self, telefono: str, documento: str, nombre: Optional[str] = None) -> IdentidadCanal:
+    def marcar_verificado(
+        self, telefono: str, documento: str, nombre: Optional[str] = None, correo: Optional[str] = None
+    ) -> IdentidadCanal:
         verificado_en = _utcnow()
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO identidad_canal (telefono, documento, estado, verificado_en, nombre)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO identidad_canal (telefono, documento, estado, verificado_en, nombre, correo)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(telefono) DO UPDATE SET
                     documento = excluded.documento,
                     estado = excluded.estado,
                     verificado_en = excluded.verificado_en,
-                    nombre = excluded.nombre
+                    nombre = excluded.nombre,
+                    correo = excluded.correo
                 """,
-                (telefono, documento, EstadoIdentidadCanal.VERIFICADO.value, verificado_en.isoformat(), nombre),
+                (telefono, documento, EstadoIdentidadCanal.VERIFICADO.value, verificado_en.isoformat(), nombre, correo),
             )
             self._conn.commit()
-        return IdentidadCanal(telefono, documento, EstadoIdentidadCanal.VERIFICADO, verificado_en, nombre)
+        return IdentidadCanal(telefono, documento, EstadoIdentidadCanal.VERIFICADO, verificado_en, nombre, correo)
 
     def eliminar(self, telefono: str) -> None:
         with self._lock:
@@ -236,13 +256,14 @@ class SQLiteIdentidadCanalStore:
 
     @staticmethod
     def _fila_a_identidad(fila) -> IdentidadCanal:
-        telefono, documento, estado, verificado_en, nombre = fila
+        telefono, documento, estado, verificado_en, nombre, correo = fila
         return IdentidadCanal(
             telefono=telefono,
             documento=documento,
             estado=EstadoIdentidadCanal(estado),
             verificado_en=datetime.fromisoformat(verificado_en) if verificado_en else None,
             nombre=nombre,
+            correo=correo,
         )
 
     def close(self) -> None:

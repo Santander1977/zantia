@@ -145,6 +145,57 @@ class HrmmAppointmentService:
             raise AppointmentServiceError(f"buscar-paciente respondió {respuesta.status}")
         return respuesta.body  # {"nombre_paciente":..., "telefono":...}
 
+    def correo_conocido(self, documento_paciente: str) -> Optional[str]:
+        """Recado 085/R-21 — hallazgo real GRAVE: una reserva confirmada
+        por chat NUNCA disparaba el correo de confirmación real, porque
+        `book_appointment` nunca tenía un `correo` que pasarle a
+        `_intentar_enviar_confirmacion` — NO por un problema de n8n/Task
+        Runner (hipótesis inicial del usuario, descartada con evidencia),
+        sino porque `buscar_paciente` (GET /citas/buscar-paciente, el
+        único dato de contacto que el wizard de identidad consulta)
+        devuelve `PacienteBuscado` (schema real de hrmm-backend, solo
+        lectura confirmada en el repo `hrmm`) — que deliberadamente NO
+        incluye `correo` (privacidad: es un endpoint público, sin auth,
+        que usa el navegador del portal de citas). `register_patient_contact`
+        tampoco ayuda: existe pero NUNCA se llama desde ningún camino real
+        (confirmado con `grep`), así que `contacto.get("correo")` en
+        `book_appointment` (abajo) siempre fue `None` para toda reserva
+        hecha por chat, siempre, estructuralmente — nunca un fallo
+        intermitente de infraestructura.
+
+        El correo real SÍ existe del lado de hrmm-backend (lo usa
+        `enviar_codigo_verificacion` internamente, `next((c.correo for c
+        in citas if c.correo), None)` sobre las citas ya existentes del
+        documento) pero nunca se expuso vía `buscar_paciente`. SÍ se
+        expone, sin embargo, en el modelo `Cita` completo (`correo:
+        Optional[str]`) que devuelve `GET /api/agenda/citas` — el MISMO
+        endpoint, trusted, que ya usa `get_patient_appointments` — así
+        que no hace falta coordinar ningún cambio con hrmm-backend: se
+        replica acá, del lado de ZANTIA, la MISMA técnica que
+        hrmm-backend ya usa internamente, sobre un endpoint que ZANTIA ya
+        tiene permiso de llamar. Deliberadamente NO reutiliza
+        `get_patient_appointments`/`_cita_a_appointment` (ese método
+        descarta 'correo' — `Appointment` ni siquiera lo modela) — llamada
+        cruda y propia, mismo criterio que `buscar_paciente`.
+
+        `None` si el paciente no tiene ninguna cita previa con correo
+        registrado (mismo caso límite que ya vive en hrmm-backend: un
+        paciente genuinamente nuevo, sin ninguna cita previa, tampoco
+        puede completar la verificación de identidad por este canal —
+        ver `enviar_codigo_verificacion` — así que esta función solo
+        necesita encontrar un correo para el subconjunto de pacientes que
+        SÍ llegó a verificarse, que es exactamente el mismo subconjunto
+        para el que hrmm-backend ya demostró tener un correo en archivo)."""
+        respuesta = self._http.request(
+            "GET",
+            "/api/agenda/citas",
+            params={"documento_paciente": documento_paciente},
+            headers=self._headers_confianza(),
+        )
+        if respuesta.status != 200:
+            return None
+        return next((c.get("correo") for c in respuesta.body if c.get("correo")), None)
+
     def list_services(self) -> List[str]:
         """Extensión duck-typed (recado 027, mismo criterio que
         `buscar_paciente`/`requires_verification_code` — no forma parte
@@ -252,6 +303,15 @@ class HrmmAppointmentService:
                         return cita  # ya existe una equivalente — no se duplica
 
         contacto = self._contactos.get(patient_reference, {})
+        # `correo` explícito tiene prioridad; si no se pasó, se usa el
+        # que ya estuviera cacheado por `register_patient_contact`
+        # (nunca se inventa uno) — calculado ANTES del POST (recado
+        # 085/R-21: antes se calculaba después, y `CitaCreate.correo`
+        # — campo real que hrmm-backend sí persiste en la cita, ver
+        # schema — nunca se enviaba en el body de creación, así que la
+        # cita quedaba con `correo: null` en la base real incluso
+        # cuando el correo de confirmación SÍ se lograba enviar después).
+        correo_efectivo = correo or contacto.get("correo")
         respuesta = self._http.request(
             "POST",
             "/api/agenda/citas",
@@ -260,6 +320,7 @@ class HrmmAppointmentService:
                 "documento_paciente": patient_reference,
                 "nombre_paciente": contacto.get("nombre", ""),
                 "telefono": contacto.get("telefono", ""),
+                "correo": correo_efectivo,
                 "canal": "zantia",
             },
         )
@@ -276,10 +337,7 @@ class HrmmAppointmentService:
         # dispara ningún correo por sí solo (confirmado leyendo el
         # código real de hrmm-backend) — enviar la confirmación es
         # SIEMPRE un segundo paso explícito y separado
-        # (`enviar_confirmacion_email`, abajo). `correo` explícito tiene
-        # prioridad; si no se pasó, se usa el que ya estuviera cacheado
-        # por `register_patient_contact` (nunca se inventa uno).
-        correo_efectivo = correo or contacto.get("correo")
+        # (`enviar_confirmacion_email`, abajo).
         enviado = self._intentar_enviar_confirmacion(creada.appointment_id, correo_efectivo)
         return creada.model_copy(update={"correo_confirmacion_enviado": enviado})
 

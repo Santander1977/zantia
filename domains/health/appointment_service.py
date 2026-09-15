@@ -43,8 +43,17 @@ class AppointmentService(Protocol):
     ) -> List[AvailabilitySlot]: ...
 
     def book_appointment(
-        self, slot_id: str, patient_reference: str, idempotency_key: str
-    ) -> Appointment: ...
+        self, slot_id: str, patient_reference: str, idempotency_key: str, correo: Optional[str] = None
+    ) -> Appointment:
+        """`correo` (recado 054/058, extendido en el 085/R-21): opcional
+        a propósito — el Mock lo acepta e ignora (no simula envío de
+        correo real); `HrmmAppointmentService` lo usa para disparar el
+        correo de confirmación real (`_intentar_enviar_confirmacion`).
+        Se declara acá, en el Protocol, para que ambas implementaciones
+        compartan la misma firma real (antes solo `HrmmAppointmentService`
+        lo tenía, sin reflejarse aquí — un desajuste inofensivo mientras
+        nadie llamaba con `correo=`, pero confuso de leer)."""
+        ...
 
     def confirm_appointment(self, appointment_id: str) -> Appointment: ...
 
@@ -118,8 +127,14 @@ class MockAppointmentService:
         return list(self._catalogo_servicios)
 
     def book_appointment(
-        self, slot_id: str, patient_reference: str, idempotency_key: str
+        self, slot_id: str, patient_reference: str, idempotency_key: str, correo: Optional[str] = None
     ) -> Appointment:
+        # `correo` aceptado e ignorado a propósito (recado 085/R-21) —
+        # el Mock nunca simula un envío de correo real, mismo criterio
+        # que `correo_confirmacion_enviado` (siempre `None` acá, ver
+        # `Appointment`, sin tocar). Necesario para que `tools.py:
+        # BookAppointmentTool` pueda pasar `correo=` sin distinguir
+        # Mock vs. Hrmm en el call site.
         with self._lock:
             if idempotency_key in self._idempotency:
                 return self._appointments[self._idempotency[idempotency_key]]

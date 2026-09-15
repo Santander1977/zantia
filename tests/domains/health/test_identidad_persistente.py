@@ -188,6 +188,116 @@ def test_dos_gateways_distintos_comparten_identidad_via_store(tmp_path, monkeypa
     assert proceso_2._identidad_resuelta[_TELEFONO] == _DOCUMENTO_VALIDO
 
 
+# ---------------------------------------------------------------------
+# Recado 085/R-21 — hallazgo real GRAVE: una reserva confirmada por chat
+# NUNCA disparaba el correo real de confirmación, porque `buscar_paciente`
+# (el único dato de contacto que el wizard consultaba) no expone
+# `correo` (`PacienteBuscado`, schema real de hrmm-backend — solo
+# nombre_paciente/telefono, por privacidad). El correo SÍ existe del
+# lado de hrmm-backend y SÍ se expone vía `GET /api/agenda/citas`
+# (`Cita.correo`, trusted) — mismo endpoint que `get_patient_appointments`
+# ya usa. `HrmmAppointmentService.correo_conocido` replica la MISMA
+# técnica que hrmm-backend usa internamente para `enviar_codigo_verificacion`
+# (`next((c.correo for c in citas if c.correo), None)`) del lado de
+# ZANTIA. Estos 2 tests confirman: (1) el correo se captura y persiste
+# en `identity_store` al verificar identidad, igual que `nombre`
+# (recado 034); (2) `book_appointment` incluye ese correo en el payload
+# real hacia hrmm-backend — tanto en la creación de la cita
+# (`CitaCreate.correo`, antes SIEMPRE ausente) como en el segundo paso
+# de envío de confirmación (`enviar_confirmacion_email`).
+# ---------------------------------------------------------------------
+def test_correo_real_se_captura_y_persiste_tras_verificar_identidad():
+    store = SQLiteIdentidadCanalStore(":memory:")
+    cita_previa = {
+        "cita_id": "CITA-PREVIA-1", "documento_paciente": _DOCUMENTO_VALIDO,
+        "nombre_paciente": "Paciente de Prueba", "telefono": _TELEFONO,
+        "correo": "paciente.real@example.com", "estado": "atendida",
+        "servicio_id": "S1", "medico_id": "M1", "fecha": "2026-01-01", "hora_inicio": "08:00",
+    }
+    gateway = _build_gateway(store, citas_por_documento={_DOCUMENTO_VALIDO: [cita_previa]})
+
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m1", "hola")
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m2", _DOCUMENTO_VALIDO)
+    respuesta_codigo = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m3", "654321")
+    assert "confirmé tu identidad" in respuesta_codigo.lower()
+
+    registro = store.get(_TELEFONO)
+    assert registro is not None
+    assert registro.correo == "paciente.real@example.com"
+
+
+def test_book_appointment_incluye_el_correo_conocido_en_el_payload_real():
+    store = SQLiteIdentidadCanalStore(":memory:")
+    cita_previa = {
+        "cita_id": "CITA-PREVIA-2", "documento_paciente": _DOCUMENTO_VALIDO,
+        "nombre_paciente": "Paciente de Prueba", "telefono": _TELEFONO,
+        "correo": "paciente.real@example.com", "estado": "atendida",
+        "servicio_id": "S1", "medico_id": "M1", "fecha": "2026-01-01", "hora_inicio": "08:00",
+    }
+
+    payloads_creacion = []
+
+    def generador(method, path, params, json_body, headers):
+        if method == "GET" and path == "/api/agenda/servicios":
+            return HttpResponse(200, [{"servicio_id": "S1", "nombre": "medicina general"}])
+        if method == "GET" and path == "/api/agenda/medicos":
+            return HttpResponse(200, [{"medico_id": "M1", "nombre_completo": "Dra. Ana Pérez", "servicio_id": "S1", "consultorio": "Consultorio 3"}])
+        if method == "GET" and path == "/api/agenda/citas/buscar-paciente":
+            if params.get("documento") == _DOCUMENTO_VALIDO:
+                return HttpResponse(200, {"nombre_paciente": "Paciente de Prueba", "telefono": _TELEFONO})
+            return HttpResponse(404, {"detail": "no encontrado"})
+        if method == "GET" and path == "/api/agenda/citas":
+            documento = params.get("documento_paciente")
+            return HttpResponse(200, [cita_previa] if documento == _DOCUMENTO_VALIDO else [])
+        if method == "POST" and path == "/api/agenda/verificacion/enviar":
+            return HttpResponse(200, {"enviado": True, "mensaje": "ok", "correo_parcial": "p***@dominio.com"})
+        if method == "POST" and path == "/api/agenda/verificacion/confirmar":
+            return HttpResponse(200, {"valido": json_body.get("codigo") == "654321"})
+        if method == "GET" and path == "/api/agenda/disponibilidad":
+            return HttpResponse(200, [
+                {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-20", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Libre"},
+            ])
+        if method == "POST" and path == "/api/agenda/citas":
+            payloads_creacion.append(json_body)
+            return HttpResponse(201, {
+                "cita_id": "CITA-NUEVA-1", "slot_id": json_body["slot_id"], "medico_id": "M1",
+                "servicio_id": "S1", "fecha": "2026-09-20", "hora_inicio": "09:00",
+                "documento_paciente": json_body["documento_paciente"], "nombre_paciente": "Paciente de Prueba",
+                "telefono": _TELEFONO, "correo": json_body.get("correo"), "estado": "agendada",
+            })
+        if method == "POST" and path.endswith("/enviar-confirmacion"):
+            return HttpResponse(200, {"exito": True, "estado": "enviado", "mensaje": "ok"})
+        if method == "GET" and path == "/api/agenda/citas/CITA-NUEVA-1":
+            return HttpResponse(200, {
+                "cita_id": "CITA-NUEVA-1", "slot_id": "SLOT1", "medico_id": "M1",
+                "servicio_id": "S1", "fecha": "2026-09-20", "hora_inicio": "09:00",
+                "documento_paciente": _DOCUMENTO_VALIDO, "nombre_paciente": "Paciente de Prueba",
+                "telefono": _TELEFONO, "correo": "paciente.real@example.com", "estado": "confirmada",
+            })
+        raise AssertionError(f"no programado en este test: {method} {path} {params}")
+
+    http = FakeHttpClient(generador=generador)
+    catalog = CatalogMirror()
+    catalog.sync(http)
+    service = HrmmAppointmentService(http, catalog)
+    gateway = build_health_gateway(
+        MockActivitySource(), service, ReminderManager(), MockActivityResultSink(), identity_store=store,
+    )
+
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m1", "necesito una cita")
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m2", _DOCUMENTO_VALIDO)
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m3", "654321")
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m4", "1")  # elige la fecha (único día disponible)
+    handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m5", "1")  # elige el horario
+    respuesta_reserva = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m6", "1")  # confirma
+
+    assert "confirmado" in respuesta_reserva.lower()
+    assert len(payloads_creacion) == 1, f"debía crear exactamente 1 cita: {payloads_creacion!r}"
+    assert payloads_creacion[0]["correo"] == "paciente.real@example.com", (
+        f"el correo real conocido no llegó al payload de creación de la cita: {payloads_creacion[0]!r}"
+    )
+
+
 def test_identidad_pendiente_no_verificada_no_se_reconoce():
     """Una fila PENDIENTE_VERIFICACION (wizard interrumpido antes del
     código) nunca se trata como confiable — solo VERIFICADO hidrata

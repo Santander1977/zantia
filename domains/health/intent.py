@@ -31,7 +31,28 @@ def _sin_tildes(texto: str) -> str:
 _PROGRAMAR = ("programar", "agendar", "sacar una cita", "quiero una cita", "necesito una cita", "pedir cita")
 _REPROGRAMAR = ("reprogramar", "cambiar mi cita", "cambiar la cita", "mover mi cita", "otra fecha")
 _CANCELAR = ("cancelar mi cita", "cancelar la cita", "anular mi cita", "ya no quiero la cita")
-_CONSULTAR = ("consultar mi cita", "qué cita tengo", "cuándo es mi cita", "tengo alguna cita", "mis citas")
+# Recado 084 — hallazgo real de producción: "consultame las citas del
+# último mes" no coincidía con NINGUNA frase de esta lista — todas
+# exigían la forma posesiva "mi(s) cita(s)" ("consultar mi cita", "mis
+# citas"), nunca la forma con pronombre enclítico ("consultame") ni el
+# artículo definido sin posesivo ("las citas"). A diferencia de
+# "consultar mis citas" (que además calza con la palabra suelta
+# "consultar" de `gateway.py:_MENU_OPCIONES` y se resuelve en el primer
+# chequeo, determinista y gratis), esta variante caía por completo
+# fuera de la clasificación determinista y dependía enteramente del
+# último recurso asistido por LLM (`_clasificar_solicitud_nueva_via_llm`)
+# — sin proposer configurado, o si el LLM no la reconocía, el mensaje se
+# trataba como "sin intención" en vez de como la consulta real que es.
+_CONSULTAR = (
+    "consultar mi cita", "qué cita tengo", "cuándo es mi cita", "tengo alguna cita", "mis citas",
+    "consultame las citas", "consultame mis citas", "consultar las citas",
+    # Recado 085 — misma transcripción real del recado 084, turno
+    # SIGUIENTE ("consultas las citas mias del ultimo mes"): forma
+    # conjugada "consultas" (no "consultar"/"consultame") + orden
+    # "citas mias" (posesivo DESPUÉS del sustantivo, no antes como
+    # "mis citas") — ninguna combinación previa la cubría.
+    "consultas las citas mias", "las citas mias",
+)
 _CONFIRMAR = ("confirmo mi cita", "confirmo la cita", "sí voy a mi cita", "asistiré a mi cita")
 _ESCALAMIENTO = ("hablar con alguien", "persona real", "un humano", "un asesor", "quiero hablar con")
 # Bug real de producción (recado 027): "Programar cuál servicios tienes
