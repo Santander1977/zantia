@@ -243,3 +243,38 @@ def test_correo_de_confirmacion_tras_reprogramacion_real(monkeypatch):
     assert "reprogramada" in r3.lower()
     # Recado 054 — sin correo conocido, mismo criterio que arriba.
     assert "te enviamos un correo de confirmación" not in r3.lower()
+
+
+# ---------------------------------------------------------------------
+# 3. Recado 086 — el sufijo ahora nombra la gestión real (requisito
+#    explícito del usuario: "reserva"/"cancelación"/"reprogramación",
+#    nunca un "confirmación" genérico que no distinga cuál gestión
+#    disparó el correo). Unidad directa de `sufijo_confirmacion_correo`
+#    — la cobertura end-to-end con correo SÍ conocido (incluido el
+#    backfill de identidades ya verificadas) vive en
+#    `test_identidad_persistente.py` y en el corpus de regresión del
+#    recado 086.
+# ---------------------------------------------------------------------
+def test_sufijo_confirmacion_correo_nombra_la_gestion_real():
+    from domains.health.models import sufijo_confirmacion_correo
+
+    assert sufijo_confirmacion_correo(True, "reserva") == " El correo de reserva fue enviado a tu correo."
+    assert sufijo_confirmacion_correo(True, "cancelación") == " El correo de cancelación fue enviado a tu correo."
+    assert sufijo_confirmacion_correo(True, "reprogramación") == " El correo de reprogramación fue enviado a tu correo."
+
+
+def test_sufijo_confirmacion_correo_fallo_es_honesto_y_nombra_la_gestion():
+    from domains.health.models import sufijo_confirmacion_correo
+
+    texto = sufijo_confirmacion_correo(False, "cancelación")
+    assert "el correo de cancelación" in texto.lower()
+    assert "no pudimos verificar" in texto.lower()
+    # Nunca afirma que se envió si falló.
+    assert "fue enviado" not in texto.lower()
+
+
+def test_sufijo_confirmacion_correo_sin_intento_devuelve_vacio_sin_importar_la_gestion():
+    from domains.health.models import sufijo_confirmacion_correo
+
+    assert sufijo_confirmacion_correo(None, "reserva") == ""
+    assert sufijo_confirmacion_correo(None, "reprogramación") == ""

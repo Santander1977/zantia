@@ -79,6 +79,12 @@ def _gateway_dos_servicios(monkeypatch):
             ])
         if method == "GET" and path == "/api/agenda/medicos":
             return HttpResponse(200, [])
+        # Recado 086 — identidad ya verificada SIN correo (fila de
+        # "antes del recado 085/086") dispara el backfill de
+        # `_correo_conocido` la primera vez que hace falta reservar —
+        # ver docstring de `HrmmAppointmentService.correo_conocido`.
+        if method == "GET" and path == "/api/agenda/citas":
+            return HttpResponse(200, [])
         raise AssertionError(f"no programado en este test: {method} {path}")
 
     http = FakeHttpClient(generador=generador)

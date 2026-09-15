@@ -369,3 +369,95 @@ def test_pregunta_de_servicio_usa_el_catalogo_real_sincronizado_de_hrmm(monkeypa
     assert "Odontología" in respuesta
     assert "Psicología" in respuesta
     assert "opciones disponibles" not in respuesta.lower()  # no asumió ninguno todavía
+
+
+# ---------------------------------------------------------------------
+# Recado 086 — el correo de confirmación SIGUE sin dispararse para
+# cancelar/reprogramar vía este sub-flujo verificado, incluso después
+# del recado 085: `correo` venía HARDCODEADO en `None` acá (comentario
+# viejo, nunca actualizado tras el 085). Además, el backfill (para una
+# identidad ya verificada SIN correo, ver `test_identidad_persistente.py`)
+# también aplica acá — mismo `_correo_conocido` compartido. El mensaje
+# final ahora nombra la gestión real ("cancelación"/"reprogramación"),
+# requisito explícito del usuario.
+# ---------------------------------------------------------------------
+def test_cancelar_con_hrmm_dispara_el_correo_real_y_nombra_la_gestion(hrmm_gateway):
+    from domains.health.identity_store import SQLiteIdentidadCanalStore
+
+    store = SQLiteIdentidadCanalStore(":memory:")
+    store.marcar_verificado("999", "999", "Ana")  # SIN correo — identidad "de antes del 085/086"
+
+    cita_con_correo = dict(_CITA_BASE, correo="ana.real@example.com")
+
+    def cancelar_ok(params, json_body):
+        assert json_body.get("email") == "ana.real@example.com", (
+            f"el correo backfilled no llegó al envío de confirmación real: {json_body!r}"
+        )
+        return HttpResponse(200, {"exito": True, "estado": "enviado", "mensaje": "ok"})
+
+    http = FakeHttpClient(generador=_generador_basico(
+        citas_por_documento={"999": [cita_con_correo]},
+        extra={
+            ("POST", "/api/agenda/verificacion/enviar"): lambda p, j: HttpResponse(
+                200, {"enviado": True, "correo_parcial": "a***@dominio.com"}
+            ),
+            ("POST", "/api/agenda/citas/C1/cancelar"): lambda p, j: HttpResponse(
+                200, dict(_CITA_BASE, estado="cancelada")
+            ),
+            ("POST", "/api/agenda/citas/C1/enviar-confirmacion"): cancelar_ok,
+        },
+    ))
+    catalog = CatalogMirror()
+    catalog.sync(http)
+    service = HrmmAppointmentService(http, catalog)
+    gateway = build_health_gateway(
+        MockActivitySource(), service, ReminderManager(), MockActivityResultSink(), identity_store=store,
+    )
+
+    handle_inbound_message(gateway, "999", "demo", "m1", "cancelar mi cita por favor")
+    respuesta = handle_inbound_message(gateway, "999", "demo", "m2", "654321")
+
+    assert "cancelada" in respuesta.lower()
+    assert "el correo de cancelación fue enviado a tu correo" in respuesta.lower()
+    # Backfill persistido — la próxima gestión ya no necesita otra llamada.
+    assert store.get("999").correo == "ana.real@example.com"
+
+
+def test_reprogramar_con_hrmm_dispara_el_correo_real_y_nombra_la_gestion(hrmm_gateway):
+    from domains.health.identity_store import SQLiteIdentidadCanalStore
+
+    store = SQLiteIdentidadCanalStore(":memory:")
+    store.marcar_verificado("999", "999", "Ana")  # SIN correo
+
+    cita_con_correo = dict(_CITA_BASE, correo="ana.real@example.com")
+
+    def reprogramar_ok(params, json_body):
+        assert json_body.get("email") == "ana.real@example.com"
+        return HttpResponse(200, {"exito": True, "estado": "enviado", "mensaje": "ok"})
+
+    http = FakeHttpClient(generador=_generador_basico(
+        citas_por_documento={"999": [cita_con_correo]},
+        extra={
+            ("POST", "/api/agenda/verificacion/enviar"): lambda p, j: HttpResponse(
+                200, {"enviado": True, "correo_parcial": "a***@dominio.com"}
+            ),
+            ("POST", "/api/agenda/citas/C1/reprogramar"): lambda p, j: HttpResponse(
+                200, dict(_CITA_BASE, slot_id="SLOT2", fecha="2026-09-11", hora_inicio="10:00", estado="reprogramada")
+            ),
+            ("POST", "/api/agenda/citas/C1/enviar-confirmacion"): reprogramar_ok,
+        },
+    ))
+    catalog = CatalogMirror()
+    catalog.sync(http)
+    service = HrmmAppointmentService(http, catalog)
+    gateway = build_health_gateway(
+        MockActivitySource(), service, ReminderManager(), MockActivityResultSink(), identity_store=store,
+    )
+
+    handle_inbound_message(gateway, "999", "demo", "m1", "quiero reprogramar mi cita")
+    handle_inbound_message(gateway, "999", "demo", "m2", "la segunda")
+    respuesta = handle_inbound_message(gateway, "999", "demo", "m3", "111222")
+
+    assert "reprogramada" in respuesta.lower()
+    assert "el correo de reprogramación fue enviado a tu correo" in respuesta.lower()
+    assert store.get("999").correo == "ana.real@example.com"

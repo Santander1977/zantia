@@ -141,6 +141,26 @@ class IdentidadCanalStore(Protocol):
         consultar `correo_conocido` solo para reservar."""
         ...
 
+    def actualizar_correo(self, telefono: str, correo: str) -> None:
+        """Backfill (recado 086) — hallazgo real GRAVE: una identidad
+        VERIFICADA ANTES de que el recado 085 empezara a capturar
+        `correo` queda con `correo: NULL` PARA SIEMPRE, porque un
+        paciente ya reconocido (`registro.vigente()`) nunca vuelve a
+        pasar por `marcar_verificado` — el wizard completo (documento +
+        código) no se repite mientras la identidad siga vigente (hasta
+        180 días, `RETENCION_IDENTIDAD_DIAS`). Método DEDICADO, distinto
+        de `marcar_verificado`, a propósito: actualiza SOLO la columna
+        `correo` de una fila que YA existe — nunca toca `estado`,
+        `verificado_en` (no reinicia la ventana de retención de 180 días
+        solo porque el paciente reservó algo) ni `nombre`. No-op si la
+        fila no existe (nunca crea una — solo tiene sentido sobre una
+        identidad que YA pasó el wizard completo). Ver `gateway.py:
+        _correo_conocido` para el punto donde se dispara, de forma
+        transparente para el paciente (sin ningún paso conversacional
+        extra), la primera vez que de verdad hace falta el correo
+        (reservar/cancelar/reprogramar)."""
+        ...
+
     def eliminar(self, telefono: str) -> None:
         """Borrado REAL de la fila (recado 016, requisito #2.4) —
         nunca un cambio de estado. Idempotente: no falla si la fila ya
@@ -248,6 +268,14 @@ class SQLiteIdentidadCanalStore:
             )
             self._conn.commit()
         return IdentidadCanal(telefono, documento, EstadoIdentidadCanal.VERIFICADO, verificado_en, nombre, correo)
+
+    def actualizar_correo(self, telefono: str, correo: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE identidad_canal SET correo = ? WHERE telefono = ?",
+                (correo, telefono),
+            )
+            self._conn.commit()
 
     def eliminar(self, telefono: str) -> None:
         with self._lock:

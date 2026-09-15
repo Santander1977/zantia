@@ -554,6 +554,133 @@ def test_book_appointment_persiste_el_correo_real_contra_hrmm_backend_real(monke
 
 
 # ---------------------------------------------------------------------
+# Recado 086 — hallazgo real GRAVE, reportado por un paciente real
+# (documento 72302972, NUNCA usado en este test — documento sintético
+# propio, aislado desde el diseño, mismo criterio que el test de
+# arriba): una identidad ya VERIFICADA de ANTES del recado 085 (sin
+# `correo` persistido) nunca vuelve a pasar por el wizard completo
+# mientras siga vigente — quedaba con `correo: None` PARA SIEMPRE, sin
+# importar que el fix del recado 085 estuviera desplegado. Corregido con
+# backfill transparente (`gateway.py:_correo_conocido` + nuevo
+# `identity_store.actualizar_correo`). Este test verifica AMBAS partes
+# del recado 086 juntas, contra hrmm-backend real:
+#   1. El backfill encuentra y persiste un correo real para una
+#      identidad ya verificada sin correo (simulada localmente en un
+#      `identity_store` en memoria — nunca toca la base real).
+#   2. El mensaje de confirmación final nombra la gestión real
+#      ("reserva"), usando ese correo backfilled, contra un envío REAL.
+# ---------------------------------------------------------------------
+@pytest.mark.skipif(
+    os.environ.get("ZANTIA_RUN_REAL_HRMM_TESTS") != "1",
+    reason="Prueba de red real contra hrmm-backend deshabilitada por defecto — ver recado 086.",
+)
+def test_backfill_de_correo_y_mensaje_con_tipo_gestion_contra_hrmm_backend_real(monkeypatch):
+    import time
+
+    from domains.health import MockActivitySource, MockActivityResultSink, ReminderManager
+    from domains.health.gateway import build_health_gateway, _correo_conocido
+    from domains.health.hrmm_http import RealHttpClient
+    from domains.health.identity_store import SQLiteIdentidadCanalStore
+    from domains.health.models import sufijo_confirmacion_correo
+
+    if not _HRMM_BACKEND_SECRET_REAL:
+        pytest.skip("HRMM_BACKEND_SECRET real no disponible en el entorno de este proceso.")
+    monkeypatch.setenv("HRMM_BACKEND_SECRET", _HRMM_BACKEND_SECRET_REAL)
+
+    base_url = os.environ["HRMM_BACKEND_URL"]
+    secreto = _HRMM_BACKEND_SECRET_REAL
+    http_real = RealHttpClient(base_url)
+    catalog_real = CatalogMirror()
+    catalog_real.sync(http_real)
+    servicio_real = next(iter(catalog_real._servicios.values())).nombre
+    service_real = HrmmAppointmentService(http_real, catalog_real)
+
+    epoch = int(time.time())
+    documento = f"ZANTIA-TEST-086-{epoch}"
+    telefono_canal = f"5730003{epoch % 10000:04d}"
+    correo_real_previo = f"zantia-test-086-{epoch}@example.com"
+
+    opciones = service_real.get_availability(servicio_real)
+    assert len(opciones) >= 2, "Se necesitan 2 turnos reales distintos para esta prueba."
+    # Recado 086 — bug real de diseño de este test, encontrado en la
+    # primera corrida completa (junto a otras pruebas reales del mismo
+    # archivo): `opciones[0]`/`opciones[1]` pueden compartir la MISMA
+    # (fecha, hora) si son de médicos distintos — dispara el chequeo
+    # anti-duplicado LEGÍTIMO del recado 068
+    # (`book_appointment`, "ya existe una cita equivalente — no se
+    # duplica"), que devuelve la cita YA EXISTENTE (cita_a) en vez de
+    # crear una cita_b genuina — esa relectura nunca carga
+    # `correo_confirmacion_enviado` (no es un bug del recado 086, es
+    # el mismo límite ya documentado para `_reconstruir_appointment`).
+    # Se eligen explícitamente 2 slots con (fecha, hora) DISTINTAS para
+    # que cita_b sea una reserva genuina y comparable.
+    slot_a = opciones[0]
+    slot_b = next(
+        (o for o in opciones[1:] if (o.date, o.time) != (slot_a.date, slot_a.time)), None
+    )
+    assert slot_b is not None, "No hay 2 turnos reales con fecha/hora distintas para esta prueba."
+
+    citas_creadas = []
+    try:
+        # 1) Cita A — establece un correo REAL en archivo para este
+        #    documento sintético (igual que las citas previas reales de
+        #    un paciente real que sí completó una reserva alguna vez).
+        cita_a = service_real.book_appointment(
+            slot_a.slot_id, documento, f"zantia-test-086-a:{documento}", correo=correo_real_previo
+        )
+        citas_creadas.append(cita_a.appointment_id)
+
+        # 2) Identidad "ya verificada de antes del recado 085" — SIN
+        #    correo — simulada en un identity_store LOCAL (nunca toca
+        #    ningún dato real de producción, la tabla identidad_canal
+        #    ni siquiera existe del lado de hrmm-backend).
+        store = SQLiteIdentidadCanalStore(":memory:")
+        store.marcar_verificado(telefono_canal, documento, "ZANTIA TEST 086")
+        assert store.get(telefono_canal).correo is None
+
+        gateway = build_health_gateway(
+            MockActivitySource(), service_real, ReminderManager(), MockActivityResultSink(),
+            identity_store=store,
+        )
+
+        # 3) Backfill — transparente, sin ningún wizard.
+        correo_backfilled = _correo_conocido(gateway, telefono_canal)
+        assert correo_backfilled == correo_real_previo, (
+            f"el backfill no encontró el correo real en archivo: {correo_backfilled!r}"
+        )
+        assert store.get(telefono_canal).correo == correo_real_previo, (
+            "el backfill encontró el correo pero no lo persistió en identity_store"
+        )
+
+        # 4) Cita B — reserva real usando el correo backfilled, y el
+        #    mensaje final (misma función que usa la conversación real)
+        #    nombra la gestión real, contra un envío de confirmación
+        #    REAL.
+        cita_b = service_real.book_appointment(
+            slot_b.slot_id, documento, f"zantia-test-086-b:{documento}", correo=correo_backfilled
+        )
+        citas_creadas.append(cita_b.appointment_id)
+        assert cita_b.correo_confirmacion_enviado is True, cita_b
+
+        mensaje_final = (
+            f"¡Listo! Quedó confirmado: {cita_b.service} el {cita_b.date} a las {cita_b.time} en {cita_b.location}."
+            + sufijo_confirmacion_correo(cita_b.correo_confirmacion_enviado, "reserva")
+        )
+        assert "el correo de reserva fue enviado a tu correo" in mensaje_final.lower(), mensaje_final
+    finally:
+        for cid in citas_creadas:
+            respuesta_cancelacion = http_real.request(
+                "PATCH", f"/api/agenda/citas/{cid}",
+                json_body={"estado": "cancelada", "canal": "zantia-test-086-cleanup"},
+                headers={"X-Backend-Secret": secreto},
+            )
+            assert respuesta_cancelacion.status == 200, (
+                f"LIMPIEZA FALLIDA — cita de prueba {cid} (documento {documento}) "
+                f"quedó activa en hrmm-backend real: {respuesta_cancelacion.body!r}"
+            )
+
+
+# ---------------------------------------------------------------------
 # Recado 054 — `enviar_confirmacion_email` contra hrmm-backend REAL.
 # Mismo patrón de gate que el resto de esta sección
 # (`ZANTIA_RUN_REAL_HRMM_TESTS=1`), MANUAL e INTERACTIVA a propósito:

@@ -2063,13 +2063,14 @@ def _procesar_intento_de_codigo(gateway: HealthGateway, patient_reference: str, 
     from .appointment_service import AppointmentServiceError
 
     # Recado 054/058 — mismo hallazgo que `agent.py`: hrmm-backend NUNCA
-    # envía el correo de forma nativa. `correo` sigue sin estar
-    # disponible en este sub-flujo (ZANTIA no lo captura en ningún
-    # punto de la conversación — mismo límite documentado en el recado
-    # 054/058) — se pasa igual (`None` hoy) para que el mecanismo esté
-    # listo en cuanto exista una fuente real, sin tener que volver a
-    # tocar este archivo.
-    correo_conocido = None
+    # envía el correo de forma nativa, siempre hace falta pasarlo
+    # explícito. Recado 085/086 — antes esto quedaba hardcodeado en
+    # `None` ("ZANTIA no lo captura en ningún punto de la conversación")
+    # — desde el recado 085 SÍ se captura (`_correo_conocido`, con
+    # backfill del recado 086 para identidades ya verificadas de antes),
+    # así que cancelar/reprogramar por este sub-flujo ahora también
+    # dispara el correo de confirmación real, igual que reservar.
+    correo_conocido = _correo_conocido(gateway, patient_reference)
     try:
         if pendiente["action"] == "cancelar":
             cita_resultado = gateway.appointment_service.cancel_appointment_verified(
@@ -2091,10 +2092,13 @@ def _procesar_intento_de_codigo(gateway: HealthGateway, patient_reference: str, 
 
     # Nombre real (recado 034) + sufijo de correo DINÁMICO (recado
     # 054/058, mismo criterio y misma función compartida que
-    # `agent.py` — nunca la promesa ciega de antes).
+    # `agent.py` — nunca la promesa ciega de antes). `tipo_gestion`
+    # (recado 086) nombra la gestión real — "cancelación" o
+    # "reprogramación", nunca un texto genérico.
     nombre = _nombre_conocido(gateway, patient_reference)
     saludo_nombre = f", {nombre}" if nombre else ""
-    sufijo_correo = sufijo_confirmacion_correo(cita_resultado.correo_confirmacion_enviado)
+    tipo_gestion = "cancelación" if pendiente["action"] == "cancelar" else "reprogramación"
+    sufijo_correo = sufijo_confirmacion_correo(cita_resultado.correo_confirmacion_enviado, tipo_gestion)
     if pendiente["action"] == "cancelar":
         return f"Listo{saludo_nombre}, tu cita quedó cancelada.{sufijo_correo}"
     return (
@@ -2264,9 +2268,36 @@ def _correo_conocido(gateway: "HealthGateway", patient_reference: str) -> Option
     sintética, así `book_appointment` (vía `HealthBrain`, ver
     `tool_requerida` en `brain.py`) puede disparar el correo de
     confirmación real sin pedírselo al paciente ni volver a consultar
-    `correo_conocido` en cada reserva."""
+    `correo_conocido` en cada reserva.
+
+    Recado 086 — BACKFILL, hallazgo real GRAVE confirmado con un
+    paciente real: una identidad VERIFICADA de ANTES del recado 085
+    (documento ya reconocido, wizard completo NUNCA se repite mientras
+    siga vigente — hasta 180 días) queda con `registro.correo` en
+    `None` PARA SIEMPRE — el paciente nunca vuelve a pasar por el paso
+    que ahora captura el correo. Si el registro existe pero su correo
+    está vacío, se intenta obtenerlo AHORA (mismo método duck-typed
+    `correo_conocido` que ya usa el wizard completo — GET
+    /api/agenda/citas, trusted) y, si se encuentra, se persiste vía
+    `identity_store.actualizar_correo` — transparente para el
+    paciente: ni una pregunta ni un paso conversacional de más, solo
+    una llamada de red adicional en el momento en que el correo
+    realmente hace falta (reservar/cancelar/reprogramar). Cubre a
+    CUALQUIER identidad ya persistida sin correo, no solo un paciente
+    puntual — se dispara para quien sea, la primera vez que necesite
+    reservar/cancelar/reprogramar después de este fix."""
     registro = gateway.identity_store.get(patient_reference)
-    return registro.correo if registro is not None else None
+    if registro is None:
+        return None
+    if registro.correo:
+        return registro.correo
+    obtener_correo = getattr(gateway.appointment_service, "correo_conocido", None)
+    if obtener_correo is None:
+        return None
+    correo_real = obtener_correo(registro.documento)
+    if correo_real:
+        gateway.identity_store.actualizar_correo(patient_reference, correo_real)
+    return correo_real
 
 
 def _contacto_conocido(gateway: "HealthGateway", patient_reference: str) -> Dict[str, str]:

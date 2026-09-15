@@ -191,6 +191,10 @@ def handle_patient_message(context: HealthAgentContext, message_id: str, text: s
                 context.activity.activity_id, cita.appointment_id, fecha_hora
             )
             verbo = "confirmado" if just_booked else "reprogramado"
+            # Recado 086 — mismo criterio que `verbo` arriba: el texto
+            # del correo nombra SIEMPRE la gestión real (requisito
+            # explícito del usuario), nunca un genérico "confirmación".
+            tipo_gestion = "reserva" if just_booked else "reprogramación"
             # Recado 054/058 — hallazgo real: hrmm-backend NUNCA envía el
             # correo de forma nativa al ejecutar el POST real (confirmado
             # leyendo el código real del repo hrmm) — `HrmmAppointmentService.
@@ -214,7 +218,7 @@ def handle_patient_message(context: HealthAgentContext, message_id: str, text: s
             respuesta = (
                 respuesta
                 + f" ¡Listo! Quedó {verbo}: {cita.service} el {cita.date} a las {cita.time} en {cita.location}."
-                + sufijo_confirmacion_correo(correo_confirmacion_enviado)
+                + sufijo_confirmacion_correo(correo_confirmacion_enviado, tipo_gestion)
             )
             evento = "APPOINTMENT_CONFIRMED" if just_booked else "APPOINTMENT_RESCHEDULED"
             context.orchestrator.events.record(context.activity.activity_id, EventType.STATE_TRANSITION, evento=evento)

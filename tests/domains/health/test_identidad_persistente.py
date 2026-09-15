@@ -298,6 +298,114 @@ def test_book_appointment_incluye_el_correo_conocido_en_el_payload_real():
     )
 
 
+# ---------------------------------------------------------------------
+# Recado 086 — hallazgo real GRAVE, reportado por un paciente real
+# (documento 72302972): una identidad ya VERIFICADA de ANTES del recado
+# 085 (wizard completo, sin `correo`) nunca vuelve a pasar por
+# `marcar_verificado` mientras siga vigente (reconocimiento automático,
+# `registro.vigente()`) — quedaba con `correo: None` PARA SIEMPRE, sin
+# importar que el fix del recado 085 ya estuviera desplegado. Corregido
+# con backfill transparente en `_correo_conocido`: si el registro existe
+# pero sin correo, se intenta obtener AHORA (mismo `correo_conocido` de
+# siempre) y se persiste vía el nuevo `identity_store.actualizar_correo`
+# — sin ningún paso conversacional de más para el paciente.
+# ---------------------------------------------------------------------
+def test_actualizar_correo_solo_toca_la_columna_correo():
+    """Smoke test del método nuevo — a diferencia de `marcar_verificado`,
+    NUNCA toca `estado`/`verificado_en`/`nombre` (no reinicia la
+    ventana de retención de 180 días solo porque se hizo backfill)."""
+    store = SQLiteIdentidadCanalStore(":memory:")
+    store.marcar_verificado(_TELEFONO, _DOCUMENTO_VALIDO, "Paciente de Prueba")
+    antes = store.get(_TELEFONO)
+    assert antes.correo is None
+
+    store.actualizar_correo(_TELEFONO, "backfill@example.com")
+
+    despues = store.get(_TELEFONO)
+    assert despues.correo == "backfill@example.com"
+    assert despues.nombre == antes.nombre
+    assert despues.estado == antes.estado
+    assert despues.verificado_en == antes.verificado_en  # ventana de 180 días intacta
+
+
+def test_actualizar_correo_es_no_op_si_la_fila_no_existe():
+    store = SQLiteIdentidadCanalStore(":memory:")
+    store.actualizar_correo("nunca-registrado", "x@example.com")  # no debe lanzar
+    assert store.get("nunca-registrado") is None
+
+
+def test_correo_conocido_gateway_hace_backfill_transparente_sobre_identidad_ya_verificada():
+    """Reproduce EXACTO el hallazgo real: identidad marcada VERIFICADO
+    SIN correo (simula una fila persistida antes del recado 085) — un
+    paciente reconocido automáticamente (sin wizard) reserva de una,
+    el correo se completa solo y queda persistido para la próxima vez."""
+    store = SQLiteIdentidadCanalStore(":memory:")
+    store.marcar_verificado(_TELEFONO, _DOCUMENTO_VALIDO, "Paciente de Prueba")  # SIN correo, a propósito
+    assert store.get(_TELEFONO).correo is None
+
+    cita_previa = {
+        "cita_id": "CITA-PREVIA-3", "documento_paciente": _DOCUMENTO_VALIDO,
+        "nombre_paciente": "Paciente de Prueba", "telefono": _TELEFONO,
+        "correo": "backfill.real@example.com", "estado": "atendida",
+        "servicio_id": "S1", "medico_id": "M1", "fecha": "2026-01-01", "hora_inicio": "08:00",
+    }
+    payloads_creacion = []
+
+    def generador(method, path, params, json_body, headers):
+        if method == "GET" and path == "/api/agenda/servicios":
+            return HttpResponse(200, [{"servicio_id": "S1", "nombre": "medicina general"}])
+        if method == "GET" and path == "/api/agenda/medicos":
+            return HttpResponse(200, [{"medico_id": "M1", "nombre_completo": "Dra. Ana Pérez", "servicio_id": "S1", "consultorio": "Consultorio 3"}])
+        if method == "GET" and path == "/api/agenda/citas":
+            documento = params.get("documento_paciente")
+            return HttpResponse(200, [cita_previa] if documento == _DOCUMENTO_VALIDO else [])
+        if method == "GET" and path == "/api/agenda/disponibilidad":
+            return HttpResponse(200, [
+                {"slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1", "fecha": "2026-09-20", "hora_inicio": "09:00", "hora_fin": "09:30", "estado": "Libre"},
+            ])
+        if method == "POST" and path == "/api/agenda/citas":
+            payloads_creacion.append(json_body)
+            return HttpResponse(201, {
+                "cita_id": "CITA-NUEVA-BF", "slot_id": json_body["slot_id"], "medico_id": "M1",
+                "servicio_id": "S1", "fecha": "2026-09-20", "hora_inicio": "09:00",
+                "documento_paciente": json_body["documento_paciente"], "nombre_paciente": "Paciente de Prueba",
+                "telefono": _TELEFONO, "correo": json_body.get("correo"), "estado": "agendada",
+            })
+        if method == "GET" and path == "/api/agenda/citas/CITA-NUEVA-BF":
+            return HttpResponse(200, {
+                "cita_id": "CITA-NUEVA-BF", "slot_id": "SLOT1", "medico_id": "M1", "servicio_id": "S1",
+                "fecha": "2026-09-20", "hora_inicio": "09:00", "documento_paciente": _DOCUMENTO_VALIDO,
+                "nombre_paciente": "Paciente de Prueba", "telefono": _TELEFONO,
+                "correo": "backfill.real@example.com", "estado": "confirmada",
+            })
+        if method == "POST" and path == "/api/agenda/citas/CITA-NUEVA-BF/enviar-confirmacion":
+            return HttpResponse(200, {"exito": True, "estado": "enviado", "mensaje": "ok"})
+        raise AssertionError(f"no programado en este test: {method} {path} {params}")
+
+    http = FakeHttpClient(generador=generador)
+    catalog = CatalogMirror()
+    catalog.sync(http)
+    service = HrmmAppointmentService(http, catalog)
+    gateway = build_health_gateway(
+        MockActivitySource(), service, ReminderManager(), MockActivityResultSink(), identity_store=store,
+    )
+
+    # Reconocido de una — SIN wizard, SIN preguntarle nada de más al
+    # paciente (transparente, requisito explícito del usuario).
+    respuesta = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m1", "reservar")
+    respuesta = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m2", "1")
+    respuesta = handle_inbound_message(gateway, _TELEFONO, "chatwoot", "m3", "1")
+
+    assert "documento" not in respuesta.lower(), "no debía pedir el wizard de nuevo — identidad ya vigente"
+    assert "confirmado" in respuesta.lower()
+    assert payloads_creacion[0]["correo"] == "backfill.real@example.com"
+    assert "el correo de reserva fue enviado a tu correo" in respuesta.lower()
+
+    # El backfill quedó persistido — la PRÓXIMA vez ya no hace falta
+    # ninguna llamada extra a `correo_conocido`.
+    assert store.get(_TELEFONO).correo == "backfill.real@example.com"
+
+
 def test_identidad_pendiente_no_verificada_no_se_reconoce():
     """Una fila PENDIENTE_VERIFICACION (wizard interrumpido antes del
     código) nunca se trata como confiable — solo VERIFICADO hidrata

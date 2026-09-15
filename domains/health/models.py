@@ -160,21 +160,27 @@ class Appointment(BaseModel):
     correo_confirmacion_enviado: Optional[bool] = None
 
 
-def sufijo_confirmacion_correo(correo_confirmacion_enviado: Optional[bool]) -> str:
+def sufijo_confirmacion_correo(correo_confirmacion_enviado: Optional[bool], tipo_gestion: str) -> str:
     """Recado 054/058 — texto OPCIONAL a concatenar tras confirmar una
     reserva/cancelación/reprogramación exitosa (`agent.py`/`gateway.py`)
     — NUNCA la promesa ciega de antes ("Te enviamos un correo de
     confirmación...", sin haber verificado nada). `None` (nunca se
-    intentó — hoy, el caso más común: ZANTIA no captura el correo del
-    paciente en ningún punto de la conversación) devuelve cadena VACÍA
-    a propósito: omitir el tema es más honesto que forzar una frase
-    sobre algo que no ocurrió en absoluto, y no agrega ruido a cada
-    confirmación mientras esa capacidad no exista."""
+    intentó) devuelve cadena VACÍA a propósito: omitir el tema es más
+    honesto que forzar una frase sobre algo que no ocurrió en absoluto.
+
+    `tipo_gestion` (recado 086, requisito explícito del usuario): texto
+    en español ya conjugado para la frase ("reserva"/"cancelación"/
+    "reprogramación") — cada llamador (`agent.py` para reservar/
+    reprogramar, `gateway.py` para cancelar/reprogramar por el sub-flujo
+    verificado) decide cuál, mismo criterio ya establecido para `verbo`
+    ("confirmado"/"reprogramado") en `agent.py`. El mensaje nombra
+    SIEMPRE la gestión real — nunca un texto genérico que no distinga
+    si el correo era sobre reservar, cancelar o reprogramar."""
     if correo_confirmacion_enviado is True:
-        return " Te enviamos un correo de confirmación con todos los detalles."
+        return f" El correo de {tipo_gestion} fue enviado a tu correo."
     if correo_confirmacion_enviado is False:
         return (
-            " Intentamos enviarte un correo de confirmación, pero no pudimos verificar que "
+            f" Intentamos enviarte el correo de {tipo_gestion}, pero no pudimos verificar que "
             "llegara — si no te llega, avísame y lo revisamos con el equipo."
         )
     return ""
