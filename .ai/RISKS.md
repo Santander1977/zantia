@@ -2,7 +2,7 @@
 
 > Registro vivo — se actualiza cuando se detecta un riesgo nuevo o cuando uno existente se mitiga. No se archiva en `docs/changelog/` hasta que esté resuelto.
 
-> Poblado el 2026-09-01 consolidando lo encontrado a lo largo de las fases de construcción (recados 006-009 en `/Users/enzoalfonso/recado/`). CRÍTICA/ALTA = bloquea operar con usuarios/datos reales. MEDIA/BAJA = no bloquea el MVP de demostración, sí bloquea producción real.
+> Poblado el 2026-09-01 consolidando lo encontrado a lo largo de las fases de construcción (recados 006-009 en `recado/`). CRÍTICA/ALTA = bloquea operar con usuarios/datos reales. MEDIA/BAJA = no bloquea el MVP de demostración, sí bloquea producción real.
 
 | ID | Riesgo | Impacto | Probabilidad | Componente | Evidencia | Mitigación | Prioridad | Estado |
 |---|---|---|---|---|---|---|---|---|

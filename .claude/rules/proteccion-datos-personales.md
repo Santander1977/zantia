@@ -1,6 +1,6 @@
 # Protección de datos personales (habeas data)
 
-> Regla de dominio adicional a las obligatorias de `PROJECT-TEMPLATE`, añadida en la creación de este proyecto (bajo el nombre "icaco", identidad conceptual renombrada a "ZANTIA" el 2026-09-01 — ver `PROJECT.md` y `/Users/enzoalfonso/recado/005-migracion-icaco-a-zantia.md`) porque el proyecto es un agente conversacional que procesa mensajes y datos de usuarios finales reales.
+> Regla de dominio adicional a las obligatorias de `PROJECT-TEMPLATE`, añadida en la creación de este proyecto (bajo el nombre "icaco", identidad conceptual renombrada a "ZANTIA" el 2026-09-01 — ver `PROJECT.md` y `recado/005-migracion-icaco-a-zantia.md`) porque el proyecto es un agente conversacional que procesa mensajes y datos de usuarios finales reales.
 
 ## Reglas obligatorias
 

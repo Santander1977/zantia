@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 class RagKnowledgeSource:
     """PENDIENTE: no implementado en este MVP. Ver
-    /Users/enzoalfonso/recado/006-construccion-zantia.md, sección de
+    recado/006-construccion-zantia.md, sección de
     pendientes, para el motivo (no hay corpus real ni decisión de stack
     de recuperación todavía)."""
 

@@ -2,7 +2,7 @@
 StateStore — persistencia del ConversationState (004, secciones 11-12).
 
 Decisión de stack documentada en
-/Users/enzoalfonso/recado/006-construccion-zantia.md: SQLite (vía el
+recado/006-construccion-zantia.md: SQLite (vía el
 módulo estándar `sqlite3`, sin ORM) como motor real de persistencia del
 MVP — cero dependencias externas, cero servidor que levantar, con
 semántica de fila+versión que demuestra concurrencia optimista real.

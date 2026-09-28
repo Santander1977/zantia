@@ -2,7 +2,7 @@
 Modelo formal de ConversationState.
 
 Traduce a código real el contrato conceptual diseñado en
-/Users/enzoalfonso/recado/004-contrato-estado-icaco.md (sección 2).
+recado/004-contrato-estado-icaco.md (sección 2).
 
 No es una copia 1:1 del documento: donde el documento marcó un campo
 como "derivado, no se persiste" (datos_faltantes) o como "transitorio"

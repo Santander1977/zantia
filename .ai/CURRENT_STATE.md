@@ -4,7 +4,7 @@
 
 **Última actualización**: 2026-09-07 (reconocimiento flexible de fecha/horario, recado 051 — ver nota de brecha abajo)
 
-> **Brecha de esta snapshot**: esta actualización corrige lo más urgente (el estado de R-6, abajo, estaba desactualizado) y agrega las entradas de los recados `049`/`050`, pero **no resume los recados `027` a `048`** (esta sesión no hizo ese trabajo, no tiene contexto de primera mano para resumirlo sin inventar). `git log` confirma que ese trabajo SÍ se commiteó y pusheó (`HEAD` de `main` = `f040c9f`, idéntico a `origin/main` — incluye al menos los recados 047/048, "interrupciones de contexto en cualquier etapa" y "saludo sin intención"). Quien retome este proyecto debería leer `/Users/enzoalfonso/recado/027-*.md` en adelante y completar esta sección — no asumir que el salto de `026` a `049` en "Progreso reciente" significa que no pasó nada en el medio.
+> **Brecha de esta snapshot**: esta actualización corrige lo más urgente (el estado de R-6, abajo, estaba desactualizado) y agrega las entradas de los recados `049`/`050`, pero **no resume los recados `027` a `048`** (esta sesión no hizo ese trabajo, no tiene contexto de primera mano para resumirlo sin inventar). `git log` confirma que ese trabajo SÍ se commiteó y pusheó (`HEAD` de `main` = `f040c9f`, idéntico a `origin/main` — incluye al menos los recados 047/048, "interrupciones de contexto en cualquier etapa" y "saludo sin intención"). Quien retome este proyecto debería leer `recado/027-*.md` en adelante y completar esta sección — no asumir que el salto de `026` a `049` en "Progreso reciente" significa que no pasó nada en el medio.
 
 ## Qué está desplegado
 
@@ -18,7 +18,7 @@ Ver `git status` al momento de leer esto — no asumir que coincide con esta tab
 
 **Deliberadamente SIN trackear, por seguridad — no es un olvido**: `registrar_webhook.sh` y `registrar_webhook.sh.save` contienen, en texto plano, un token real de la Bot API de Telegram y el secreto real del webhook — NUNCA se agregaron al staging ni se commitearon. Si de verdad hace falta un script para `setWebhook`, debería leer el token/secreto desde variables de entorno (`TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`, ya usadas en el resto del proyecto), nunca hardcodeados — y aun así, cualquier archivo con secretos reales pertenece a `.gitignore`, no al working tree suelto. **Recomendación fuerte, requiere decisión del usuario**: dado que ese token ya estuvo expuesto en texto plano en el filesystem (aunque nunca llegó a git), considerar rotarlo en BotFather antes de depender de él en producción.
 
-Ver `/Users/enzoalfonso/recado/` (recados numerados) para el detalle completo de cada fase.
+Ver `recado/` (recados numerados) para el detalle completo de cada fase.
 
 ## Conocido roto / pendiente de verificación
 
@@ -38,7 +38,7 @@ Ver `/Users/enzoalfonso/recado/` (recados numerados) para el detalle completo de
 
 ## Progreso reciente
 
-Resumen breve de las últimas sesiones relevantes. El detalle completo, sesión por sesión, vive en `docs/changelog/` (rotado por período — ver `.claude/rules/documentacion-y-memoria.md`) y en los recados numerados de `/Users/enzoalfonso/recado/`.
+Resumen breve de las últimas sesiones relevantes. El detalle completo, sesión por sesión, vive en `docs/changelog/` (rotado por período — ver `.claude/rules/documentacion-y-memoria.md`) y en los recados numerados de `recado/`.
 
 - 2026-08-31: Proyecto creado desde `PROJECT-TEMPLATE` (commit `6fd36c7`) vía `/new-project`. Ver recados `001` a `005`.
 - 2026-09-01 (fases 1-9, recados `006` a `013`): Core ZANTIA MVP, primer dominio real (`domains/health/`), evolución bidireccional, `HrmmAppointmentService` real, validación real de `estado`, empaquetado FastAPI+Chatwoot, gate de identidad teléfono↔documento (R-15), gestión "en nombre de otro paciente". 120 tests pasando + 1 deshabilitado a propósito al cierre de esta serie.

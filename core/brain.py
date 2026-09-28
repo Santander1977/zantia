@@ -209,7 +209,7 @@ class AnthropicBrain:
     esta sesión, y los tests deben ser deterministas y sin red/costo).
 
     Documentado explícitamente como PENDIENTE de prueba en vivo — ver
-    /Users/enzoalfonso/recado/006-construccion-zantia.md.
+    recado/006-construccion-zantia.md.
     """
 
     def __init__(self, model: str = "claude-sonnet-5", api_key_env_var: str = "ANTHROPIC_API_KEY") -> None:

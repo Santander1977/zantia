@@ -75,7 +75,7 @@ def build_appointment_service(
     if entorno == "staging":
         raise HealthConfigError(
             f"{config.env_var}=staging, pero no existe un entorno de staging real "
-            "documentado para hrmm-backend (ver recado 009 en /Users/enzoalfonso/recado/). "
+            "documentado para hrmm-backend (ver recado 009 en recado/). "
             "No se inventa una URL ni se redirige a producción ni se usa el Mock como si "
             "fuera staging real — configura 'mock' o 'production', o construye primero "
             "un staging real y documenta su URL antes de usar este valor."

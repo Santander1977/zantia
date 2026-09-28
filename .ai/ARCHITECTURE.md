@@ -4,7 +4,7 @@
 
 ## Identidad rápida
 
-Ver `PROJECT.md` para el contexto completo de negocio. Resumen: plataforma de inteligencia agéntica multi-dominio (identidad conceptual "ZANTIA" desde 2026-09-01; nació como agente conversacional de un solo dominio bajo el nombre "icaco" — ver `/Users/enzoalfonso/recado/005-migracion-icaco-a-zantia.md`). Stack del Core: Python 3.9 + pydantic + pytest + `sqlite3` (stdlib) — ver `.ai/DECISIONS.md`.
+Ver `PROJECT.md` para el contexto completo de negocio. Resumen: plataforma de inteligencia agéntica multi-dominio (identidad conceptual "ZANTIA" desde 2026-09-01; nació como agente conversacional de un solo dominio bajo el nombre "icaco" — ver `recado/005-migracion-icaco-a-zantia.md`). Stack del Core: Python 3.9 + pydantic + pytest + `sqlite3` (stdlib) — ver `.ai/DECISIONS.md`.
 
 ## Topología
 
@@ -18,7 +18,7 @@ Nota deliberada: el nombre conceptual (ZANTIA) y el nombre de la carpeta física
 
 ## Componentes
 
-Core del MVP, ya implementado y con tests pasando (ver `.ai/TESTING.md` y `/Users/enzoalfonso/recado/006-construccion-zantia.md`):
+Core del MVP, ya implementado y con tests pasando (ver `.ai/TESTING.md` y `recado/006-construccion-zantia.md`):
 
 | Componente | Tecnología | Rol | Repo/carpeta |
 |---|---|---|---|

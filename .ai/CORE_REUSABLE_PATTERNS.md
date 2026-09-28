@@ -1,7 +1,7 @@
 # CORE_REUSABLE_PATTERNS — qué hereda un dominio futuro
 
 > Sucesor con evidencia real del plan `[PROPUESTO]` del recado 033
-> (`/Users/enzoalfonso/recado/033-plan-extraer-identidad-al-core-y-adn-heredable.md`).
+> (`recado/033-plan-extraer-identidad-al-core-y-adn-heredable.md`).
 > Ese recado listaba, en 2026-09-06, lo que *se planeaba* extraer al Core
 > "cuando `domains/health/` terminara de estabilizarse". Este documento
 > es distinto en un punto importante: cataloga lo que **ya existe,

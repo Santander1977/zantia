@@ -2,7 +2,7 @@
 
 **Decisión**: la carpeta física del proyecto permanece en `/Users/enzoalfonso/Orangutan/icaco`, sin renombrarse, mudarse ni recrearse, aunque la identidad conceptual y de producto pasó a ser "ZANTIA".
 
-**Motivo**: auditoría de migración de identidad (`/Users/enzoalfonso/recado/005-migracion-icaco-a-zantia.md`) encontró que Claude Code deriva automáticamente su carpeta de memoria/sesión (`~/.claude/projects/-Users-enzoalfonso-Orangutan-icaco/`, que ya contiene el protocolo RECADO guardado) del nombre físico exacto de la ruta del proyecto. Renombrar la carpeta huerfanaría esa memoria.
+**Motivo**: auditoría de migración de identidad (`recado/005-migracion-icaco-a-zantia.md`) encontró que Claude Code deriva automáticamente su carpeta de memoria/sesión (`~/.claude/projects/-Users-enzoalfonso-Orangutan-icaco/`, que ya contiene el protocolo RECADO guardado) del nombre físico exacto de la ruta del proyecto. Renombrar la carpeta huerfanaría esa memoria.
 
 **Alternativas consideradas**:
 - **Renombrar la carpeta física a `zantia`**: descartada por ahora — requeriría coordinar el cierre de la sesión activa, migrar manualmente la memoria de Claude Code, y verificar que ninguna sesión quede huérfana; no es una operación de "construcción", es un procedimiento aparte, fuera del alcance de esta fase (ver plan de migración en `005`, sección 15, Fase E).

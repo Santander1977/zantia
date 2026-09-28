@@ -27,7 +27,7 @@ regresión permanente.
 ## Convención de nombre
 
 `test_recadoNNN_slug-corto-del-hallazgo.py` — `NNN` es el número del
-recado que documenta el hallazgo (ver `/Users/enzoalfonso/recado/`),
+recado que documenta el hallazgo (ver `recado/`),
 para poder ir directo al detalle completo (causa raíz, investigación,
 decisiones) sin tener que reconstruirlo desde el test.
 

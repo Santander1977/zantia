@@ -2,7 +2,7 @@
 
 > Identidad del proyecto: qué es, para quién, por qué existe. Debe ser seguro de compartir — nunca contiene secretos ni datos de cliente (esos van en `docs/CLIENT.local.md`, gitignored).
 
-> **Nota de nomenclatura** (2026-09-01): la identidad conceptual de este proyecto cambió de "icaco" a "ZANTIA" — ver `/Users/enzoalfonso/recado/005-migracion-icaco-a-zantia.md` para la auditoría completa de esta migración. La carpeta física del proyecto sigue llamándose `icaco` deliberadamente (esa auditoría concluyó que el nombre conceptual y el nombre físico no tienen que coincidir, y que renombrar la carpeta rompería la memoria de Claude Code ya asociada a esta ruta).
+> **Nota de nomenclatura** (2026-09-01): la identidad conceptual de este proyecto cambió de "icaco" a "ZANTIA" — ver `recado/005-migracion-icaco-a-zantia.md` para la auditoría completa de esta migración. La carpeta física del proyecto sigue llamándose `icaco` deliberadamente (esa auditoría concluyó que el nombre conceptual y el nombre físico no tienen que coincidir, y que renombrar la carpeta rompería la memoria de Claude Code ya asociada a esta ruta).
 
 ## Qué es este proyecto
 
@@ -26,7 +26,7 @@ Monorepo único.
 
 ## Stack elegido
 
-Python 3.9 + pydantic (contratos de datos) + pytest (tests) + `sqlite3` de la librería estándar (persistencia del `ConversationState`, sin servidor ni ORM). Elegido para el MVP del Core — ver `/Users/enzoalfonso/recado/006-construccion-zantia.md` para la justificación completa y las alternativas descartadas. El canal de mensajería, el modelo LLM de producción y la base de datos de un futuro dominio real siguen sin decidir.
+Python 3.9 + pydantic (contratos de datos) + pytest (tests) + `sqlite3` de la librería estándar (persistencia del `ConversationState`, sin servidor ni ORM). Elegido para el MVP del Core — ver `recado/006-construccion-zantia.md` para la justificación completa y las alternativas descartadas. El canal de mensajería, el modelo LLM de producción y la base de datos de un futuro dominio real siguen sin decidir.
 
 ## Reglas de dominio adicionales
 

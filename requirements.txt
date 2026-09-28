@@ -1,5 +1,5 @@
 # ZANTIA Core — dependencias del MVP.
-# Ver /Users/enzoalfonso/recado/006-construccion-zantia.md para la
+# Ver recado/006-construccion-zantia.md para la
 # justificación de cada elección (sección "Stack").
 
 pydantic>=2,<3

@@ -9,7 +9,7 @@ Cuando el usuario escriba literalmente "modo centro de control" (o una variante 
    2. `.ai/ARCHITECTURE.md`
    3. `.ai/DECISIONS.md`
    4. `.ai/CURRENT_STATE.md` (si existe)
-   5. El recado numerado más reciente en `/Users/enzoalfonso/recado/` (el de número más alto)
+   5. El recado numerado más reciente en `recado/` (el de número más alto)
 2. **Es un modo de SOLO LECTURA Y REPORTE** — no construir, no modificar ningún archivo, no ejecutar ninguna acción de escritura (commits, builds, despliegues, cambios de código). Comandos de solo lectura (`git status`, `git log`, `.venv/bin/pytest`) sí están permitidos y son parte esperada de la verificación del punto 4.
 3. **Responder SIEMPRE con estos 4 bloques fijos, en este orden, sin bloques adicionales**:
    - **Estado actual**: qué está construido y verificado, con evidencia real (tests pasando con su conteo exacto, commits confirmados con hash) — distinguiendo SIEMPRE lo que corre contra infraestructura real/producción de lo que solo está probado localmente o con fixtures/mocks.
@@ -20,4 +20,4 @@ Cuando el usuario escriba literalmente "modo centro de control" (o una variante 
 
 ## Origen de esta regla
 
-Instalada el 2026-09-05 a pedido explícito del usuario, replicando la convención de "modo centro de control" que ya funciona en el proyecto hermano HRMM — adaptada a la documentación real de ZANTIA (`.ai/*.md` en vez de los equivalentes de HRMM, y los recados de `/Users/enzoalfonso/recado/` en vez de la fuente de historial que use ese otro proyecto). El propósito es tener un punto de entrada rápido y confiable al estado real del proyecto, sin tener que releer manualmente cada archivo de memoria por separado, y sin arriesgar que un reporte de estado se dé por buena una sincronización entre código/documentación/git que no se comprobó de verdad en esa sesión.
+Instalada el 2026-09-05 a pedido explícito del usuario, replicando la convención de "modo centro de control" que ya funciona en el proyecto hermano HRMM — adaptada a la documentación real de ZANTIA (`.ai/*.md` en vez de los equivalentes de HRMM, y los recados de `recado/` en vez de la fuente de historial que use ese otro proyecto). El propósito es tener un punto de entrada rápido y confiable al estado real del proyecto, sin tener que releer manualmente cada archivo de memoria por separado, y sin arriesgar que un reporte de estado se dé por buena una sincronización entre código/documentación/git que no se comprobó de verdad en esa sesión.

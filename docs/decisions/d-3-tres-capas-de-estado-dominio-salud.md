@@ -16,4 +16,4 @@
 
 **Impacto**: cualquier dominio futuro (`emergency`, `sales`, `citizen`) debería seguir el mismo patrón — un lifecycle grueso + un progreso granular propios del dominio, nunca forzados dentro de `ConversationState`.
 
-**Estado**: IMPLEMENTADA (2026-09-01) — ver `domains/health/models.py` y `/Users/enzoalfonso/recado/007-agente-demanda-inducida-zantia.md`.
+**Estado**: IMPLEMENTADA (2026-09-01) — ver `domains/health/models.py` y `recado/007-agente-demanda-inducida-zantia.md`.

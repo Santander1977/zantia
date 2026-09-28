@@ -18,4 +18,4 @@
 
 **Impacto**: define el lenguaje y las herramientas de todo el Core (`core/`, `state/`, `memory/`, `knowledge/`, `tools/`, `guardrails/`, `observability/`, `agents/`). No define el stack de un futuro canal/servidor expuesto (sección 19 de `005`, sigue pendiente) ni el de un dominio real.
 
-**Estado**: IMPLEMENTADA (2026-09-01) — ver `/Users/enzoalfonso/recado/006-construccion-zantia.md`.
+**Estado**: IMPLEMENTADA (2026-09-01) — ver `recado/006-construccion-zantia.md`.
