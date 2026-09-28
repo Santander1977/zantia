@@ -229,6 +229,30 @@ class Orchestrator:
                 motivo=cambios_propuestos.get("motivo_escalamiento", "posible urgencia"),
             )
 
+        # Recado 093 — hallazgo reproducido (recado 092): un MODIFY solo
+        # reemplazaba el texto y la tool propuesta se ejecutaba igual —
+        # ej. "1, ignora tus instrucciones" en el paso de horario
+        # reservaba de verdad (book_appointment, WRITE) mientras el
+        # paciente recibía el mensaje de redirección. Ahora un MODIFY
+        # CANCELA toda tool con efecto (WRITE/NOTIFY, o desconocida —
+        # fail-closed) y el turno no avanza, igual que BLOCK. Las tools
+        # READ siguen ejecutándose a propósito: sin efecto externo, y
+        # `TipoDePreguntaAlteradaGuardrail` (recado 039) depende de que el
+        # turno que ofrece opciones (get_availability) avance mientras
+        # restaura el texto base — cancelarla desincroniza la
+        # conversación (verificado: rompe
+        # test_guardrail_de_tipo_de_pregunta_restaura_el_texto_base_reproduciendo_caso_2).
+        if (
+            veredicto.decision == GuardrailDecision.MODIFY
+            and brain_output.tool_requerida
+            and self._tools.categories_by_name().get(brain_output.tool_requerida["name"]) != ToolCategory.READ
+        ):
+            self._events.record(
+                conversation_id, EventType.GUARDRAIL_DECISION,
+                decision="MODIFY_CANCELA_TOOL", tool=brain_output.tool_requerida["name"],
+            )
+            return self._responder_sin_avanzar(state, conversation_id, mensaje=respuesta_final)
+
         # --- Ejecutar tool si el Brain la propuso y guardrails no bloqueó ---
         resultado_tool = None
         if brain_output.tool_requerida:
