@@ -18,4 +18,4 @@
 
 **Impacto**: `core/orchestrator.py` (una rama nueva antes de ejecutar la tool). Tests nuevos: `tests/core/test_modify_cancela_tool_con_efecto.py` (3) y `tests/domains/health/corpus_regresion/test_recado093_modify_no_ejecuta_reserva.py` (2). `.ai/RISKS.md` (R-27). Sin cambios en guardrails, dominios ni canales.
 
-**Estado**: IMPLEMENTADA (2026-09-28, recado `093`). El usuario **ratificó explícitamente** la variante (las tools READ se siguen ejecutando) el 2026-09-28, en lugar de la propuesta literal de cancelar cualquier tool. Commiteada; **pendiente de despliegue**, y R-27 no se cierra hasta desplegar.
+**Estado**: IMPLEMENTADA (2026-09-28, recado `093`). El usuario **ratificó explícitamente** la variante (las tools READ se siguen ejecutando) el 2026-09-28, en lugar de la propuesta literal de cancelar cualquier tool. Commit `46aed8e`, desplegado y **verificado en producción real por Telegram el 2026-09-28**: la frase interceptada no reservó, y un ordinal limpio posterior sí. R-27 RESUELTO (recados `094` y `095`).
