@@ -1845,6 +1845,34 @@ def _responder_tras_envio_de_codigo(resultado_envio: Dict[str, Any], mensaje_si_
     return resultado_envio.get("mensaje") or _MENSAJE_ENVIO_FALLIDO_GENERICO
 
 
+def _mensaje_verificacion_no_disponible(resultado_envio: Dict[str, Any]) -> str:
+    """Recado 096 (hallazgo del recado 094): cuando hrmm-backend NO envió
+    el código (`enviado=false`) al INICIAR una verificación, ningún wizard
+    queda esperando un código — antes quedaba en `esperando_codigo` y
+    todo lo que el paciente escribía (p. ej. su correo) se trataba como
+    un código inválido, en bucle. hrmm-backend no distingue el motivo con
+    un campo estructurado (propuesta (a) del recado 094, pendiente): el
+    caso "sin correo registrado" se reconoce por su texto real
+    (`hrmm/backend/app/api/agenda.py`) porque es PERMANENTE — ahí nunca
+    se sugiere reintentar. Datos de contacto: solo los reales de
+    `INFORMACION_HOSPITAL`, nunca inventados."""
+    info = INFORMACION_HOSPITAL
+    contacto = f"llamando a la línea de citas del hospital al {info.telefono_citas} o escribiendo a {info.correo_citas}"
+    if info.direccion:
+        contacto += f", o directamente en la sede ({info.direccion})"
+    mensaje_backend = resultado_envio.get("mensaje") or ""
+    if "correo registrado" in mensaje_backend.lower():
+        return (
+            "No tenemos un correo registrado a tu nombre, así que por este chat no puedo verificar "
+            "tu identidad y no te envié ningún código — no necesitas escribir uno. "
+            f"Puedes gestionar tu cita {contacto}."
+        )
+    return (
+        f"{mensaje_backend or _MENSAJE_ENVIO_FALLIDO_GENERICO} No te envié ningún código, así que no "
+        f"necesitas escribir uno. Puedes intentarlo de nuevo más tarde escribiéndome, o gestionar tu cita {contacto}."
+    )
+
+
 def _enviar_codigo_y_pausar(
     gateway: HealthGateway, patient_reference: str, accion: str, appointment_id: str, documento: str, request_id: str,
     new_slot_id: Optional[str] = None,
@@ -1855,6 +1883,13 @@ def _enviar_codigo_y_pausar(
         resultado_envio = gateway.appointment_service.send_verification_code(documento)
     except AppointmentServiceError as exc:
         return f"No pude enviar el código de verificación ({exc}). Intenta de nuevo en un momento."
+
+    if not resultado_envio.get("enviado", False):
+        # Recado 096 — sin código enviado no hay nada que esperar: se
+        # cierra el wizard (incluido un `esperando_seleccion` previo de
+        # reprogramar) en vez de tratar el próximo mensaje como código.
+        gateway._pending_verifications.pop(patient_reference, None)
+        return _mensaje_verificacion_no_disponible(resultado_envio)
 
     correo_parcial = resultado_envio.get("correo_parcial")
     gateway._pending_verifications[patient_reference] = {
@@ -2425,6 +2460,14 @@ def _iniciar_verificacion_de_identidad(
         # `_pending_identity` en etapa "esperando_documento") — el
         # paciente puede simplemente reintentar el mismo documento.
         return f"No pude enviarte el código de verificación ({exc}). Intenta de nuevo en un momento."
+
+    if not resultado_envio.get("enviado", False):
+        # Recado 096 — hallazgo que bloqueaba el chat web en el primer
+        # paso: el gate quedaba en `esperando_codigo` sin código enviado.
+        # Se sale del wizard; el siguiente mensaje reinicia el gate
+        # normal (pide documento), nunca un "código inválido" en bucle.
+        gateway._pending_identity.pop(patient_reference, None)
+        return _mensaje_verificacion_no_disponible(resultado_envio)
 
     obtener_correo = getattr(gateway.appointment_service, "correo_conocido", None)
     correo_real = obtener_correo(documento) if obtener_correo is not None else None

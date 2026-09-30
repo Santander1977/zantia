@@ -102,8 +102,10 @@ def test_cancelar_con_envio_fallido_da_mensaje_honesto_no_confirmacion_falsa(hrm
 
     assert "no pudimos enviar el código" in respuesta.lower()
     assert "listo, te enviamos" not in respuesta.lower()
-    # El wizard sigue vivo — el paciente puede pedir que se lo reenvíen.
-    assert "999" in gateway._pending_verifications
+    # Recado 096 (reemplaza la decisión del recado 081): sin código enviado,
+    # ningún wizard queda esperando uno — antes el próximo mensaje del
+    # paciente se trataba como un código inválido, en bucle.
+    assert "999" not in gateway._pending_verifications
 
 
 def test_cancelar_con_envio_fallido_sin_mensaje_usa_generico_honesto(hrmm_gateway):
@@ -208,9 +210,10 @@ def test_gate_de_identidad_con_envio_fallido_da_mensaje_honesto(hrmm_gateway):
 
     assert "no pudimos enviar el código" in respuesta.lower()
     assert "listo, te enviamos" not in respuesta.lower()
-    # El documento ya quedó validado contra buscar-paciente — el paciente no
-    # tiene que repetirlo, solo puede reintentar que le manden el código.
-    assert _SESSION_ID in gateway._pending_identity
+    # Recado 096 (reemplaza la decisión del recado 081): sin código enviado,
+    # el gate no queda en `esperando_codigo` — el próximo mensaje reinicia
+    # el gate normal, nunca "código inválido" en bucle.
+    assert _SESSION_ID not in gateway._pending_identity
 
 
 def test_gate_de_identidad_con_envio_exitoso_sigue_igual_que_antes(hrmm_gateway):
