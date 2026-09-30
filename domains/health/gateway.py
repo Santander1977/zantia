@@ -52,7 +52,14 @@ from .brain import (
     _texto_informacion_hospital,
 )
 from .confirmation import ConfirmationTracker
-from .institutional_info import INFORMACION_HOSPITAL
+from .institutional_info import INFORMACION_HOSPITAL, texto_contacto_hospital
+from .registro import (
+    MENSAJE_OPCIONES_DOCUMENTO_NO_ENCONTRADO,
+    LimitesRegistro,
+    iniciar_registro,
+    procesar_mensaje_registro,
+    registro_disponible,
+)
 from core.selection import SelectionOption, SelectionProposer, interpret_selection
 from core.timed_state import ModoVentana, TimedStateStore, VentanaDeTiempo
 from .identity_store import IdentidadCanalStore, SQLiteIdentidadCanalStore
@@ -533,6 +540,12 @@ class HealthGateway:
     # identificador de canal nuevo (recado 012, R-15) — se borra en
     # cuanto se resuelve (éxito) o se escala (máximo de intentos).
     _pending_identity: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Recado 098 — autorregistro de pacientes nuevos (`registro.py`):
+    # patient_reference -> estado del wizard. Mismo patrón que
+    # `_pending_identity`; nada de esto se guarda en hrmm antes de la
+    # aceptación explícita de la autorización (Ley 1581).
+    _pending_registro: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    _limites_registro: LimitesRegistro = field(default_factory=LimitesRegistro)
     # patient_reference -> ya se le mostró el saludo institucional
     # completo (recado 048) MIENTRAS todavía no existe ninguna
     # conversación abierta para él (`_open_conversations`) — cubre el
@@ -828,6 +841,8 @@ def handle_inbound_message(gateway: HealthGateway, patient_reference: str, chann
         # rompía 84 tests — ver recado 046): el menú es una guía visible
         # que se antepone, nunca una pregunta que hace esperar al
         # paciente antes de seguir con el wizard de documento.
+        if patient_reference in gateway._pending_registro:
+            return procesar_mensaje_registro(gateway, patient_reference, text)
         es_primer_mensaje_del_wizard = patient_reference not in gateway._pending_identity
         respuesta_identificacion = _gestionar_identificacion(gateway, patient_reference, channel, text)
         if es_primer_mensaje_del_wizard:
@@ -1856,10 +1871,7 @@ def _mensaje_verificacion_no_disponible(resultado_envio: Dict[str, Any]) -> str:
     (`hrmm/backend/app/api/agenda.py`) porque es PERMANENTE — ahí nunca
     se sugiere reintentar. Datos de contacto: solo los reales de
     `INFORMACION_HOSPITAL`, nunca inventados."""
-    info = INFORMACION_HOSPITAL
-    contacto = f"llamando a la línea de citas del hospital al {info.telefono_citas} o escribiendo a {info.correo_citas}"
-    if info.direccion:
-        contacto += f", o directamente en la sede ({info.direccion})"
+    contacto = texto_contacto_hospital()
     mensaje_backend = resultado_envio.get("mensaje") or ""
     if "correo registrado" in mensaje_backend.lower():
         return (
@@ -2352,6 +2364,16 @@ def _contacto_conocido(gateway: "HealthGateway", patient_reference: str) -> Dict
     return contacto
 
 
+def _documento_para_registro(texto: str) -> Optional[str]:
+    """Recado 098 — `texto` normalizado (sin puntos, espacios ni
+    guiones) si parece un número de documento (4-15 caracteres
+    alfanuméricos con al menos 4 dígitos), si no `None`."""
+    candidato = re.sub(r"[\s.\-]", "", texto.strip()).upper()
+    if re.fullmatch(r"[A-Z0-9]{4,15}", candidato) and sum(c.isdigit() for c in candidato) >= 4:
+        return candidato
+    return None
+
+
 def _gestionar_identificacion(gateway: HealthGateway, patient_reference: str, channel: str, text: str) -> str:
     """Wizard determinista de 3 pasos (pedir documento -> validar contra
     buscar-paciente -> confirmar con código de verificación, recado
@@ -2393,6 +2415,28 @@ def _gestionar_identificacion(gateway: HealthGateway, patient_reference: str, ch
     if pendiente.get("stage") == "esperando_codigo":
         return _procesar_codigo_de_identificacion(gateway, patient_reference, pendiente, text)
 
+    if pendiente.get("stage") == "documento_no_encontrado":
+        # Recado 098 — opciones tras un documento no encontrado. Si el
+        # paciente escribe directamente otro número, es una corrección.
+        if _documento_para_registro(text) is None:
+            normalizado = _sin_tildes_menu(text.lower().strip())
+            eleccion = _elegir_opcion_ordinal(text, ["corregir", "registrarme", "hospital"])
+            if eleccion is None and "registr" in normalizado:
+                eleccion = "registrarme"
+            elif eleccion is None and "correg" in normalizado:
+                eleccion = "corregir"
+            if eleccion == "registrarme":
+                del gateway._pending_identity[patient_reference]
+                return iniciar_registro(gateway, patient_reference, pendiente["channel"], pendiente["documento_candidato"])
+            if eleccion == "hospital":
+                del gateway._pending_identity[patient_reference]
+                return f"Con gusto. Puedes comunicarte {texto_contacto_hospital()}."
+            if eleccion == "corregir":
+                pendiente["stage"] = "esperando_documento"
+                return "De acuerdo, escríbeme de nuevo tu número de documento."
+            return MENSAJE_OPCIONES_DOCUMENTO_NO_ENCONTRADO.format(documento=pendiente["documento_candidato"])
+        pendiente["stage"] = "esperando_documento"
+
     documento = text.strip()
     identidad = resolve_patient_identity(gateway, documento) if documento else None
     if identidad is not None:
@@ -2422,6 +2466,16 @@ def _gestionar_identificacion(gateway: HealthGateway, patient_reference: str, ch
             )
         )
         return _MENSAJE_ESCALAMIENTO_INBOUND
+
+    # Recado 098 — si el servicio activo soporta autorregistro y lo
+    # escrito parece un documento, se reconfirma el número y se ofrece
+    # registrarse (nunca se registra automáticamente: un documento mal
+    # escrito es el caso más común).
+    documento_registro = _documento_para_registro(documento)
+    if documento_registro is not None and registro_disponible(gateway):
+        pendiente["stage"] = "documento_no_encontrado"
+        pendiente["documento_candidato"] = documento_registro
+        return MENSAJE_OPCIONES_DOCUMENTO_NO_ENCONTRADO.format(documento=documento_registro)
 
     return _MENSAJE_DOCUMENTO_NO_ENCONTRADO
 

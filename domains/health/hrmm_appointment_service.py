@@ -16,6 +16,12 @@ Contrato real confirmado (no asumido):
 - GET  /api/agenda/citas/buscar-paciente  — público, ?documento=... -> {nombre_paciente, telefono}
 - GET  /api/agenda/servicios, /medicos    — públicos (ver hrmm_catalog.py)
 - POST /api/agenda/verificacion/enviar    — requiere X-Backend-Secret, body {documento_paciente} -> código de 6 dígitos por CORREO (vía webhook n8n, TTL 10 min, 5 intentos, un solo uso)
+- Autorregistro por chat (recado 098 §3, cambios 1/5/7) — [PROPUESTO, NO EXISTEN TODAVÍA en hrmm-backend]; ZANTIA se construye contra este contrato EXACTO, en paralelo a la sesión de hrmm (autorización del usuario, 2026-09-30):
+  - GET  /api/agenda/autorizacion-datos/vigente — X-Backend-Secret -> 200 {version, texto, sha256}
+  - POST /api/agenda/autorizacion-datos         — X-Backend-Secret, body {documento_paciente, tipo_documento, version, sha256, canal, aceptado_en} -> 201 {autorizacion_id}
+  - GET  /api/agenda/eps                        — X-Backend-Secret -> 200 [str, ...] (lista vigente, incluye "Pendiente")
+  - POST /api/agenda/pacientes/registro         — X-Backend-Secret, body {documento_paciente, tipo_documento, nombre_paciente, fecha_nacimiento, correo, telefono, eps, tipo_afiliacion, autorizacion_id, canal} -> 201 (creado en estado pendiente_verificacion) | 409 (documento ya existe o con registro en curso; NUNCA modifica nada)
+  - La verificación del correo reutiliza verificacion/enviar (cambio 3: lee el correo del registro pendiente) y verificacion/confirmar (cambio 4: al acertar, el registro pasa a verificado_correo).
 - POST /api/agenda/verificacion/confirmar — [PROPUESTO, NO CONFIRMADO] contrato mínimo que ZANTIA necesita para verificar identidad de canal (recado 014) sin estar atado a cancelar/reprogramar una cita. A diferencia del resto de este archivo (verificado leyendo el código fuente real de hrmm-backend), este endpoint TODAVÍA NO EXISTE ahí: `app/recovery_codes.py:verificar_codigo(documento_paciente, codigo)` es genérico (no depende de ninguna cita), pero hoy solo se invoca dentro de `cancelar_cita`/`reprogramar_cita` (`app/api/agenda.py`), ambos con `cita_id` obligatorio en la URL. Decisión explícita del usuario (2026-09-02): construir el lado ZANTIA contra este contrato documentado, y coordinar el endpoint real como trabajo aparte en el repositorio de hrmm-backend antes de desplegar `confirm_verification_code` contra la red real — ver `.ai/RISKS.md` (riesgo nuevo, bloqueante) y `domains/health/identity_store.py`.
 
 Identidad: hrmm-backend identifica pacientes por `documento_paciente`
@@ -450,6 +456,74 @@ class HrmmAppointmentService:
         if respuesta.status == 401:
             return False
         raise AppointmentServiceError(f"verificacion/confirmar respondió {respuesta.status}: {respuesta.body}")
+
+    # ------------------------------------------------------------------
+    # Autorregistro por chat (recado 098) — contrato PROPUESTO, ver
+    # docstring del módulo. Duck-typed (nunca parte del Protocol
+    # `AppointmentService`), mismo criterio que `buscar_paciente`: el
+    # gateway solo ofrece "Registrarme" si el servicio activo tiene
+    # `registrar_paciente`. Todo fallo (HTTP != esperado o transporte)
+    # sale como `AppointmentServiceError`, mismo criterio del recado 082.
+    # ------------------------------------------------------------------
+    def _request_registro(self, method: str, path: str, json_body: Optional[Dict[str, Any]] = None):
+        try:
+            return self._http.request(method, path, json_body=json_body, headers=self._headers_confianza())
+        except HttpError as exc:
+            raise AppointmentServiceError(f"{path}: fallo de transporte ({exc})") from exc
+
+    def obtener_autorizacion_vigente(self) -> Dict[str, str]:
+        """Texto de autorización de tratamiento de datos (Ley 1581)
+        VIGENTE, servido por hrmm (dueño del texto, recado 098 §1.4).
+        Verifica aquí que `sha256` corresponda de verdad a `texto` —
+        la prueba que se guarda al aceptar es ese hash, así que nunca se
+        muestra un texto cuyo hash no coincide."""
+        import hashlib
+
+        respuesta = self._request_registro("GET", "/api/agenda/autorizacion-datos/vigente")
+        if respuesta.status != 200:
+            raise AppointmentServiceError(f"autorizacion-datos/vigente respondió {respuesta.status}")
+        datos = respuesta.body or {}
+        texto, version, sha = datos.get("texto"), datos.get("version"), datos.get("sha256")
+        if not texto or not version or not sha:
+            raise AppointmentServiceError("autorizacion-datos/vigente: respuesta incompleta")
+        if hashlib.sha256(texto.encode("utf-8")).hexdigest() != sha:
+            raise AppointmentServiceError("autorizacion-datos/vigente: el sha256 no corresponde al texto")
+        return {"texto": texto, "version": version, "sha256": sha}
+
+    def listar_eps(self) -> List[str]:
+        respuesta = self._request_registro("GET", "/api/agenda/eps")
+        if respuesta.status != 200 or not isinstance(respuesta.body, list):
+            raise AppointmentServiceError(f"eps respondió {respuesta.status}")
+        return [str(e) for e in respuesta.body]
+
+    def registrar_autorizacion(
+        self, documento_paciente: str, tipo_documento: str, version: str, sha256: str, canal: str, aceptado_en: str
+    ) -> str:
+        respuesta = self._request_registro(
+            "POST",
+            "/api/agenda/autorizacion-datos",
+            json_body={
+                "documento_paciente": documento_paciente, "tipo_documento": tipo_documento,
+                "version": version, "sha256": sha256, "canal": canal, "aceptado_en": aceptado_en,
+            },
+        )
+        autorizacion_id = (respuesta.body or {}).get("autorizacion_id") if respuesta.status in (200, 201) else None
+        if not autorizacion_id:
+            raise AppointmentServiceError(f"autorizacion-datos respondió {respuesta.status}: {respuesta.body}")
+        return str(autorizacion_id)
+
+    def registrar_paciente(self, datos: Dict[str, Any]) -> str:
+        """`"creado"` (201, queda `pendiente_verificacion`) o
+        `"ya_existe"` (409 — documento existente o registro en curso;
+        hrmm no modificó nada). Nunca usa el upsert
+        `POST /api/agenda/pacientes`, que sobrescribe el correo de un
+        paciente existente (recado 097, E1)."""
+        respuesta = self._request_registro("POST", "/api/agenda/pacientes/registro", json_body=datos)
+        if respuesta.status in (200, 201):
+            return "creado"
+        if respuesta.status == 409:
+            return "ya_existe"
+        raise AppointmentServiceError(f"pacientes/registro respondió {respuesta.status}: {respuesta.body}")
 
     def cancel_appointment_verified(
         self, appointment_id: str, documento_paciente: str, codigo: str, correo: Optional[str] = None

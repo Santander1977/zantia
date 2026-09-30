@@ -26,6 +26,20 @@
 
 `AppointmentService` (reserva/disponibilidad) SIEMPRE recibe el documento del BENEFICIARIO cuando existe, nunca el del gestor — pero el EventLog (`observability/events.py`, vía `agent.py`) registra AMBOS, en campos separados (`gestor_documento`, `beneficiario_documento`), nunca fusionados, precisamente para que esta distinción no se pierda en la auditoría. Ver `.ai/RISKS.md` R-15.
 
+## Autorregistro por chat: propósito de cada dato (recados 097/098, Ley 1581)
+
+> Documentado ANTES de recolectar (`.claude/rules/proteccion-datos-personales.md`). **Dueño del dato: hrmm-backend** (`agenda.pacientes`), no ZANTIA. ZANTIA solo guarda el vínculo canal↔documento verificado (`identidad_canal`, 180 días). Durante el wizard, lo capturado vive solo en memoria de proceso (`HealthGateway._pending_registro`) y se descarta al salir, rechazar o terminar.
+
+| Dato | Propósito | ¿Obligatorio? |
+|---|---|---|
+| Tipo y número de documento | Identificar al paciente; distinguir menores (TI/RC: fuera de la v1) | Sí |
+| Nombre completo | Atención, confirmaciones y saludo | Sí |
+| Fecha de nacimiento | Detectar duplicados y errores de tipeo; excluir a menores de 18 | Sí |
+| Correo (verificado con código) | Canal de los códigos de verificación y de las confirmaciones de citas | Sí |
+| Teléfono | Contacto y recordatorios | Sí |
+| EPS y régimen | Cobertura y facturación. **Dato sensible, de respuesta facultativa**: "No sé / prefiero no decir" se guarda como `Pendiente` | No |
+| Autorización (versión, sha256, canal, fecha) | Prueba legal de la aceptación explícita (Ley 1581) | Sí, antes que cualquier otro dato |
+
 ## Política de retención por tipo de dato (`.claude/rules/proteccion-datos-personales.md`)
 
 | Dato | Retención | Estado |

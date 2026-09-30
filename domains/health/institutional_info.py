@@ -55,3 +55,15 @@ INFORMACION_HOSPITAL = InformacionInstitucional(
     correo_citas="agendacitas@esehospitalrmm.gov.co",
     direccion="Carrera 17 # 57-119, Barrio Pueblo Nuevo, Barrancabermeja",
 )
+
+
+def texto_contacto_hospital() -> str:
+    """Frase con los canales REALES de contacto del hospital, para los
+    mensajes que derivan al paciente fuera del chat (recados 096/098).
+    Única fuente de esa frase: se omite la sede si `direccion` es
+    `None`, nunca se completa con una suposición."""
+    info = INFORMACION_HOSPITAL
+    contacto = f"llamando a la línea de citas del hospital al {info.telefono_citas} o escribiendo a {info.correo_citas}"
+    if info.direccion:
+        contacto += f", o directamente en la sede ({info.direccion})"
+    return contacto

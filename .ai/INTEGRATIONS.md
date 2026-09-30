@@ -12,6 +12,17 @@
 
 Registrado el 2026-08-31 al crear el proyecto: se confirmó que habrá integración de mensajería, pero el canal específico y el mecanismo de integración (API oficial, proveedor tercero, etc.) todavía no se decidieron — completar antes de implementar.
 
+**Registrado el 2026-09-30 (recado 098): autorregistro de pacientes nuevos por chat hacia hrmm-backend.**
+- **Datos personales NUEVOS reenviados a hrmm:** documento, tipo de documento, nombre, fecha de nacimiento, correo, teléfono, EPS y régimen, más la prueba de la autorización (versión y sha256 del texto, canal, fecha).
+- **Propósito:** registrar al paciente en el sistema del hospital (dueño del dato), para agendar y gestionar sus citas y enviarle confirmaciones y códigos. Todo se envía **solo después** de la aceptación explícita de la autorización de la Ley 1581 y de la confirmación del resumen.
+- **Contrato consumido, PROPUESTO** (los endpoints no existen todavía en hrmm; los implementa la sesión de hrmm en paralelo):
+  - `GET /api/agenda/autorizacion-datos/vigente`
+  - `POST /api/agenda/autorizacion-datos`
+  - `GET /api/agenda/eps`
+  - `POST /api/agenda/pacientes/registro` (201 o 409; **nunca** el upsert `POST /api/agenda/pacientes`)
+  - más los ya existentes `verificacion/enviar` y `verificacion/confirmar`
+- **Forma exacta:** docstring de `domains/health/hrmm_appointment_service.py`. **Prueba de contrato del lado consumidor:** `tests/domains/health/test_autorregistro.py::test_registro_completo_crea_pendiente_verifica_correo_y_resuelve_identidad`.
+
 Registrado el 2026-09-01: integración con hrmm-backend construida (`domains/health/hrmm_appointment_service.py`), contrato de endpoints verificado leyendo el código real de `hrmm-backend` (solo lectura, ningún archivo de ese proyecto fue modificado — respeta `.claude/rules/aislamiento-entre-proyectos.md`). Esta integración reenvía datos personales reales (documento, nombre, teléfono) a un sistema externo — su propósito exacto y el mecanismo quedan documentados aquí, tal como exige `.claude/rules/proteccion-datos-personales.md`. Escritura contra red real todavía no ejecutada — solo lectura (ver recados `010`/`011`).
 
 Registrado el 2026-09-01 (recado 011): integración con Chatwoot construida (`channels/chatwoot_channel.py` + `service/app.py`), probada con payloads fijos (fixtures) y con un servidor uvicorn real vía `curl` — nunca conectada a un inbox/número de WhatsApp real en esta sesión (sin acceso a credenciales de Chatwoot). Pendiente que el usuario confirme/cree un inbox de PRUEBA y configure `CHATWOOT_URL`/`CHATWOOT_ACCOUNT_ID`/`CHATWOOT_API_TOKEN`. Ver `.ai/RISKS.md` R-4/R-15 para la brecha de identidad teléfono↔documento que debe resolverse antes de combinar este canal con `HRMM_BACKEND_ENV=production`.
